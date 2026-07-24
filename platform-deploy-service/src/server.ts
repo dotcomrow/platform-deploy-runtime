@@ -115,6 +115,17 @@ type PlatformOperation = {
   result_json?: JsonRecord | null;
 };
 
+type PlatformDeploySecretsInput = {
+  tfe_token: string;
+  tfe_agent_pool_id: string;
+  tfe_organization: string;
+  cloudflare_token: string;
+  cloudflare_account_id: string;
+  cloudflare_zone_id: string;
+  app_auth_gateway_admin_token: string;
+  github_token: string;
+};
+
 type VaultCacheEntry = {
   expiresAt: number;
   value: string;
@@ -262,6 +273,70 @@ async function vaultValue(path: string, key: string): Promise<string> {
     expiresAt: Date.now() + TOKEN_CACHE_SECONDS * 1000
   });
   return value;
+}
+
+async function vaultKv2Data(path: string): Promise<JsonRecord> {
+  const token = await vaultToken();
+  const normalizedPath = path.replace(/^\/+/, "").replace(/^v1\//, "");
+  const result = await httpJson<JsonRecord>(`${VAULT_ADDR}/v1/${normalizedPath}`, {
+    headers: { "x-vault-token": token },
+    timeoutMs: REQUEST_TIMEOUT_MS
+  });
+  if (result.statusCode === 404) {
+    return {};
+  }
+  if (result.statusCode >= 400) {
+    throw new Error(`Vault read ${path} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
+  }
+  const payload = asRecord(result.payload) ?? {};
+  const data = asRecord(payload.data) ?? {};
+  return asRecord(data.data) ?? data;
+}
+
+async function writeVaultKv2Data(path: string, patch: JsonRecord): Promise<void> {
+  const token = await vaultToken();
+  const normalizedPath = path.replace(/^\/+/, "").replace(/^v1\//, "");
+  const existing = await vaultKv2Data(path);
+  const nextData = {
+    ...existing,
+    ...patch
+  };
+  const result = await httpJson<JsonRecord>(`${VAULT_ADDR}/v1/${normalizedPath}`, {
+    method: "POST",
+    body: { data: nextData },
+    headers: { "x-vault-token": token },
+    timeoutMs: REQUEST_TIMEOUT_MS
+  });
+  if (result.statusCode >= 400) {
+    throw new Error(`Vault write ${path} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
+  }
+  for (const key of Object.keys(patch)) {
+    vaultCache.delete(`${path}#${key}`);
+  }
+}
+
+function platformDeploySecretsInput(body: JsonRecord): PlatformDeploySecretsInput {
+  const candidate = asRecord(body.body) ?? body;
+  const input: PlatformDeploySecretsInput = {
+    tfe_token: asString(candidate.tfe_token),
+    tfe_agent_pool_id: asString(candidate.tfe_agent_pool_id),
+    tfe_organization: asString(candidate.tfe_organization),
+    cloudflare_token: asString(candidate.cloudflare_token),
+    cloudflare_account_id: asString(candidate.cloudflare_account_id),
+    cloudflare_zone_id: asString(candidate.cloudflare_zone_id),
+    app_auth_gateway_admin_token: asString(candidate.app_auth_gateway_admin_token),
+    github_token: asString(candidate.github_token)
+  };
+  const missing = Object.entries(input)
+    .filter(([, value]) => !value.trim())
+    .map(([key]) => key);
+  if (missing.length) {
+    throw Object.assign(new Error(`Missing required platform deploy secret values: ${missing.join(", ")}`), { status: 422 });
+  }
+  if (!input.tfe_agent_pool_id.startsWith("apool-")) {
+    throw Object.assign(new Error("tfe_agent_pool_id must start with apool-."), { status: 422 });
+  }
+  return input;
 }
 
 async function directusToken(): Promise<string> {
@@ -927,6 +1002,46 @@ const openApiSpec = {
         },
         additionalProperties: true
       },
+      SavePlatformDeploySecretsRequest: {
+        type: "object",
+        required: [
+          "tfe_token",
+          "tfe_agent_pool_id",
+          "tfe_organization",
+          "cloudflare_token",
+          "cloudflare_account_id",
+          "cloudflare_zone_id",
+          "app_auth_gateway_admin_token",
+          "github_token"
+        ],
+        additionalProperties: false,
+        properties: {
+          tfe_token: { type: "string", minLength: 1 },
+          tfe_agent_pool_id: { type: "string", minLength: 1 },
+          tfe_organization: { type: "string", minLength: 1 },
+          cloudflare_token: { type: "string", minLength: 1 },
+          cloudflare_account_id: { type: "string", minLength: 1 },
+          cloudflare_zone_id: { type: "string", minLength: 1 },
+          app_auth_gateway_admin_token: { type: "string", minLength: 1 },
+          github_token: { type: "string", minLength: 1 }
+        }
+      },
+      SavePlatformDeploySecretsResponse: {
+        type: "object",
+        required: ["ok", "vault_paths", "saved_keys"],
+        properties: {
+          ok: { type: "boolean" },
+          vault_paths: {
+            type: "array",
+            items: { type: "string" }
+          },
+          saved_keys: {
+            type: "array",
+            items: { type: "string" }
+          }
+        },
+        additionalProperties: false
+      },
       ErrorResponse: {
         type: "object",
         properties: {
@@ -999,6 +1114,37 @@ const openApiSpec = {
           }
         }
       }
+    },
+    "/internal/secrets/platform-deploy": {
+      post: {
+        operationId: "savePlatformDeploySecrets",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/SavePlatformDeploySecretsRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Platform deploy secrets saved to Vault",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/SavePlatformDeploySecretsResponse" }
+              }
+            }
+          },
+          "422": {
+            description: "One or more required secret fields are missing",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
     }
   }
 };
@@ -1061,6 +1207,46 @@ app.post("/internal/apps/:id/destroy", async (req, res, next) => {
     const body = asRecord(req.body) ?? {};
     const result = await queueOperation(req.params.id, operationTypeFromBody(body, "destroy"));
     res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
+  try {
+    await enforceInternalAuth(req);
+    const body = asRecord(req.body) ?? {};
+    const input = platformDeploySecretsInput(body);
+    await writeVaultKv2Data("secret/data/platform-deploy-service", {
+      tfe_token: input.tfe_token,
+      tfe_agent_pool_id: input.tfe_agent_pool_id,
+      tfe_organization: input.tfe_organization,
+      cloudflare_token: input.cloudflare_token,
+      cloudflare_account_id: input.cloudflare_account_id,
+      cloudflare_zone_id: input.cloudflare_zone_id,
+      app_auth_gateway_admin_token: input.app_auth_gateway_admin_token
+    });
+    await writeVaultKv2Data("secret/data/platform-deploy-service/github", {
+      token: input.github_token,
+      github_token: input.github_token
+    });
+    res.status(200).json({
+      ok: true,
+      vault_paths: [
+        "secret/data/platform-deploy-service",
+        "secret/data/platform-deploy-service/github"
+      ],
+      saved_keys: [
+        "tfe_token",
+        "tfe_agent_pool_id",
+        "tfe_organization",
+        "cloudflare_token",
+        "cloudflare_account_id",
+        "cloudflare_zone_id",
+        "app_auth_gateway_admin_token",
+        "github_token"
+      ]
+    });
   } catch (error) {
     next(error);
   }

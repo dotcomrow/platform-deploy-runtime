@@ -60,6 +60,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/QueueOperationResponse"
+  /internal/secrets/platform-deploy:
+    post:
+      operationId: savePlatformDeploySecrets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SavePlatformDeploySecretsRequest"
+      responses:
+        "200":
+          description: Platform deploy secrets saved to Vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavePlatformDeploySecretsResponse"
+        "422":
+          description: One or more required secret fields are missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   parameters:
     AppIdPath:
@@ -98,7 +120,8 @@ components:
         - ok
         - app_id
         - operation_id
-        - job_name
+        - flink_job_id
+        - prepared_topic
       additionalProperties: true
       properties:
         ok:
@@ -107,8 +130,65 @@ components:
           type: string
         operation_id:
           type: string
-        job_name:
+        flink_job_id:
           type: string
+        prepared_topic:
+          type: string
+    SavePlatformDeploySecretsRequest:
+      type: object
+      required:
+        - tfe_token
+        - tfe_agent_pool_id
+        - tfe_organization
+        - cloudflare_token
+        - cloudflare_account_id
+        - cloudflare_zone_id
+        - app_auth_gateway_admin_token
+        - github_token
+      additionalProperties: false
+      properties:
+        tfe_token:
+          type: string
+          minLength: 1
+        tfe_agent_pool_id:
+          type: string
+          minLength: 1
+        tfe_organization:
+          type: string
+          minLength: 1
+        cloudflare_token:
+          type: string
+          minLength: 1
+        cloudflare_account_id:
+          type: string
+          minLength: 1
+        cloudflare_zone_id:
+          type: string
+          minLength: 1
+        app_auth_gateway_admin_token:
+          type: string
+          minLength: 1
+        github_token:
+          type: string
+          minLength: 1
+    SavePlatformDeploySecretsResponse:
+      type: object
+      required:
+        - ok
+        - vault_paths
+        - saved_keys
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        vault_paths:
+          type: array
+          items:
+            type: string
+        saved_keys:
+          type: array
+          items:
+            type: string
     ErrorResponse:
       type: object
       properties:

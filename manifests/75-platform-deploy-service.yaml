@@ -4,6 +4,12 @@ metadata:
   name: platform-deploy-runner
   namespace: directus
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-deploy-service
+  namespace: directus
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -943,7 +949,7 @@ data:
       method "kubernetes" {
         mount_path = "auth/kubernetes"
         config = {
-          role = "directus"
+          role = "platform-deploy-service"
         }
       }
 
@@ -977,7 +983,7 @@ spec:
       labels:
         app: platform-deploy-service
     spec:
-      serviceAccountName: directus
+      serviceAccountName: platform-deploy-service
       containers:
         - name: vault-agent
           image: hashicorp/vault:1.15.4
