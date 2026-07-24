@@ -1,0 +1,1147 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-deploy-runner
+  namespace: directus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-deploy-job-manager
+  namespace: directus
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-deploy-job-manager
+  namespace: directus
+subjects:
+  - kind: ServiceAccount
+    name: directus
+    namespace: directus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: platform-deploy-job-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-deploy-secret-bootstrap
+  namespace: directus
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-deploy-secret-bootstrap
+  namespace: directus
+subjects:
+  - kind: ServiceAccount
+    name: directus
+    namespace: directus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: platform-deploy-secret-bootstrap
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-deploy-secret-bootstrap
+  namespace: directus
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: Force=true
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      serviceAccountName: directus
+      restartPolicy: Never
+      volumes:
+        - name: vault-root-token
+          secret:
+            secretName: vault-root-token
+      containers:
+        - name: bootstrap
+          image: alpine/k8s:1.31.4
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              apk add --no-cache curl jq openssl >/dev/null
+
+              VAULT_ADDR="http://vault.vault.svc.cluster.local:8200"
+              VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
+              SECRET_PATH="secret/data/platform-deploy-service"
+
+              code="$(curl -sS -o /tmp/platform-deploy-token.json -w '%{http_code}' \
+                -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                "${VAULT_ADDR}/v1/${SECRET_PATH}" || true)"
+
+              if [ "${code}" = "200" ]; then
+                service_token="$(jq -r '.data.data.token // empty' /tmp/platform-deploy-token.json)"
+                existing_secret_data="$(jq -c '.data.data // {}' /tmp/platform-deploy-token.json)"
+                github_token="$(jq -r '.data.data.github_token // .data.data["github-token"] // empty' /tmp/platform-deploy-token.json)"
+                tfe_token="$(jq -r '.data.data.tfe_token // .data.data["tfe-token"] // .data.data.tf_api_token // empty' /tmp/platform-deploy-token.json)"
+                tfe_agent_pool_id="$(jq -r '.data.data.tfe_agent_pool_id // .data.data["tfe-agent-pool-id"] // empty' /tmp/platform-deploy-token.json)"
+                tfe_organization="$(jq -r '.data.data.tfe_organization // .data.data["tfe-organization"] // .data.data.tf_cloud_organization // empty' /tmp/platform-deploy-token.json)"
+              else
+                service_token=""
+                existing_secret_data="{}"
+                github_token=""
+                tfe_token=""
+                tfe_agent_pool_id=""
+                tfe_organization=""
+              fi
+
+              if [ -z "${service_token}" ] || [ "${service_token}" = "null" ]; then
+                service_token="$(openssl rand -base64 48 | tr -d '\n' | tr '/+' '._')"
+                payload="$(jq -nc --arg token "${service_token}" --argjson existing "${existing_secret_data}" '{data:($existing + {token:$token})}')"
+                write_code="$(curl -sS -o /tmp/platform-deploy-token-write.json -w '%{http_code}' \
+                  -X POST \
+                  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  -d "${payload}" \
+                  "${VAULT_ADDR}/v1/${SECRET_PATH}" || true)"
+                if [ "${write_code}" != "200" ] && [ "${write_code}" != "204" ]; then
+                  echo "Failed to write ${SECRET_PATH} to Vault (HTTP ${write_code})."
+                  cat /tmp/platform-deploy-token-write.json || true
+                  exit 1
+                fi
+              fi
+
+              if [ -z "${github_token}" ] || [ "${github_token}" = "null" ]; then
+                github_code="$(curl -sS -o /tmp/platform-deploy-github-token.json -w '%{http_code}' \
+                  -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                  "${VAULT_ADDR}/v1/secret/data/platform-deploy-service/github" || true)"
+                if [ "${github_code}" = "200" ]; then
+                  github_token="$(jq -r '.data.data.token // .data.data.github_token // .data.data["github-token"] // empty' /tmp/platform-deploy-github-token.json)"
+                fi
+              fi
+
+              token_b64="$(printf '%s' "${service_token}" | base64 | tr -d '\n')"
+              if kubectl -n directus get secret platform-deploy-secrets >/dev/null 2>&1; then
+                patch="$(jq -nc --arg serviceToken "${token_b64}" '{data:{"service-token":$serviceToken}}')"
+                kubectl -n directus patch secret platform-deploy-secrets --type merge -p "${patch}"
+              else
+                kubectl -n directus create secret generic platform-deploy-secrets \
+                  --from-literal=service-token="${service_token}"
+              fi
+
+              if [ -n "${github_token}" ] && [ "${github_token}" != "null" ]; then
+                github_token_b64="$(printf '%s' "${github_token}" | base64 | tr -d '\n')"
+                github_patch="$(jq -nc --arg githubToken "${github_token_b64}" '{data:{"github-token":$githubToken}}')"
+                kubectl -n directus patch secret platform-deploy-secrets --type merge -p "${github_patch}"
+                echo "GitHub repository token is present in Kubernetes Secret."
+              else
+                echo "GitHub repository token was not found in Vault; terraform_cloud platform deploys require platform-deploy-secrets.github-token."
+              fi
+
+              terraform_patch="$(jq -nc \
+                --arg tfeToken "$(printf '%s' "${tfe_token}" | base64 | tr -d '\n')" \
+                --arg tfeAgentPoolId "$(printf '%s' "${tfe_agent_pool_id}" | base64 | tr -d '\n')" \
+                --arg tfeOrganization "$(printf '%s' "${tfe_organization}" | base64 | tr -d '\n')" \
+                '{
+                  data: (
+                    (if $tfeToken != "" then {"tfe-token":$tfeToken} else {} end) +
+                    (if $tfeAgentPoolId != "" then {"tfe-agent-pool-id":$tfeAgentPoolId} else {} end) +
+                    (if $tfeOrganization != "" then {"tfe-organization":$tfeOrganization} else {} end)
+                  )
+                }')"
+              if [ "$(printf '%s' "${terraform_patch}" | jq -r '.data | length')" != "0" ]; then
+                kubectl -n directus patch secret platform-deploy-secrets --type merge -p "${terraform_patch}"
+                echo "Terraform Cloud deploy settings from Vault are present in Kubernetes Secret."
+              else
+                echo "Terraform Cloud token/settings were not found in Vault; terraform_cloud platform deploys require platform-deploy-secrets.tfe-token and an agent pool id."
+              fi
+
+              echo "platform-deploy-service token is present in Vault and Kubernetes Secret."
+          volumeMounts:
+            - name: vault-root-token
+              mountPath: /vault-token
+              readOnly: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-deploy-state
+  namespace: directus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: longhorn
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-app-deploy-runner
+  namespace: directus
+data:
+  run.sh: |
+    #!/usr/bin/env sh
+    set -eu
+
+    callback() {
+      path="$1"
+      body="$2"
+      if [ -z "${PLATFORM_DEPLOY_CALLBACK_URL:-}" ]; then
+        echo "[runner] PLATFORM_DEPLOY_CALLBACK_URL is not set; skipping callback ${path}."
+        return 0
+      fi
+
+      auth_args=""
+      if [ -n "${PLATFORM_DEPLOY_SERVICE_TOKEN:-}" ]; then
+        auth_args="-H Authorization: Bearer ${PLATFORM_DEPLOY_SERVICE_TOKEN}"
+      fi
+
+      # shellcheck disable=SC2086
+      curl -fsS --connect-timeout 10 --max-time 60 \
+        -X POST \
+        -H "Content-Type: application/json" \
+        ${auth_args} \
+        -d "${body}" \
+        "${PLATFORM_DEPLOY_CALLBACK_URL%/}${path}" >/dev/null
+    }
+
+    finish() {
+      status="$1"
+      error_message="${2:-}"
+      log_excerpt=""
+      if [ -f /tmp/platform-deploy.log ]; then
+        log_excerpt="$(tail -c 8000 /tmp/platform-deploy.log || true)"
+      fi
+      body="$(jq -nc \
+        --arg app_id "${APP_ID:-}" \
+        --arg operation_type "${OPERATION_TYPE:-redeploy}" \
+        --arg status "${status}" \
+        --arg error_message "${error_message}" \
+        --arg log_excerpt "${log_excerpt}" \
+        --arg terraform_run_id "${PLATFORM_DEPLOY_RUN_ID:-}" \
+        --arg terraform_run_url "${PLATFORM_DEPLOY_RUN_URL:-}" \
+        --arg github_repository "${GITHUB_REPOSITORY:-}" \
+        --arg github_initial_workflow "${GITHUB_INITIAL_WORKFLOW:-}" \
+        --arg github_release_version "${RELEASE_VERSION:-}" \
+        --arg github_ref "${GITHUB_REF:-}" \
+        '{app_id:$app_id,operation_type:$operation_type,status:$status,error_message:$error_message,log_excerpt:$log_excerpt,terraform_run_id:$terraform_run_id,terraform_run_url:$terraform_run_url,result_json:{runner:"platform-app-deploy-runner",github_repository:$github_repository,github_initial_workflow:$github_initial_workflow,github_release_version:$github_release_version,github_ref:$github_ref,terraform_run_id:$terraform_run_id,terraform_run_url:$terraform_run_url}}')"
+      callback "/internal/operations/${OPERATION_ID}/finish" "${body}" || true
+    }
+
+    fail() {
+      echo "[runner] $*" | tee -a /tmp/platform-deploy.log
+      finish "failed" "$*"
+      exit 1
+    }
+
+    urlencode() {
+      jq -rn --arg value "$1" '$value|@uri'
+    }
+
+    github_api() {
+      method="$1"
+      path="$2"
+      body="${3:-}"
+      out="${4:-/tmp/github-api.json}"
+
+      [ -n "${GITHUB_TOKEN:-}" ] || fail "GITHUB_TOKEN is required for Terraform Cloud deployments."
+      [ -n "${GITHUB_API_BASE:-}" ] || GITHUB_API_BASE="https://api.github.com"
+
+      url="${GITHUB_API_BASE%/}${path}"
+      if [ -n "${body}" ]; then
+        curl -sS -o "${out}" -w '%{http_code}' \
+          -X "${method}" \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Content-Type: application/json" \
+          -d "${body}" \
+          "${url}" 2>>/tmp/platform-deploy.log || true
+      else
+        curl -sS -o "${out}" -w '%{http_code}' \
+          -X "${method}" \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${url}" 2>>/tmp/platform-deploy.log || true
+      fi
+    }
+
+    expect_http_success() {
+      code="$1"
+      out="$2"
+      message="$3"
+      case "${code}" in
+        200|201|202|204)
+          return 0
+          ;;
+      esac
+      echo "[runner] ${message} (HTTP ${code})." | tee -a /tmp/platform-deploy.log
+      if [ -f "${out}" ]; then
+        cat "${out}" >>/tmp/platform-deploy.log || true
+      fi
+      fail "${message} (HTTP ${code})."
+    }
+
+    tfe_api() {
+      method="$1"
+      path="$2"
+      body="${3:-}"
+      out="${4:-/tmp/tfe-api.json}"
+
+      [ -n "${TF_API_TOKEN:-}" ] || fail "TF_API_TOKEN is required for Terraform Cloud deployments."
+      [ -n "${TFE_API_BASE:-}" ] || TFE_API_BASE="https://app.terraform.io/api/v2"
+
+      url="${TFE_API_BASE%/}${path}"
+      if [ -n "${body}" ]; then
+        curl -sS -o "${out}" -w '%{http_code}' \
+          -X "${method}" \
+          -H "Authorization: Bearer ${TF_API_TOKEN}" \
+          -H "Content-Type: application/vnd.api+json" \
+          -d "${body}" \
+          "${url}" 2>>/tmp/platform-deploy.log || true
+      else
+        curl -sS -o "${out}" -w '%{http_code}' \
+          -X "${method}" \
+          -H "Authorization: Bearer ${TF_API_TOKEN}" \
+          -H "Content-Type: application/vnd.api+json" \
+          "${url}" 2>>/tmp/platform-deploy.log || true
+      fi
+    }
+
+    upsert_github_variable() {
+      name="$1"
+      value="$2"
+      [ -n "${name}" ] || return 0
+      [ -n "${value}" ] || return 0
+
+      payload="$(jq -nc --arg name "${name}" --arg value "${value}" '{name:$name,value:$value}')"
+      encoded_name="$(urlencode "${name}")"
+      out="/tmp/github-variable-${name}.json"
+      code="$(github_api "PATCH" "/repos/${GITHUB_REPOSITORY}/actions/variables/${encoded_name}" "${payload}" "${out}")"
+      case "${code}" in
+        200|201|204)
+          echo "[runner] Updated GitHub repository variable ${name}." | tee -a /tmp/platform-deploy.log
+          return 0
+          ;;
+        404)
+          code="$(github_api "POST" "/repos/${GITHUB_REPOSITORY}/actions/variables" "${payload}" "${out}")"
+          expect_http_success "${code}" "${out}" "Failed to create GitHub repository variable ${name}"
+          echo "[runner] Created GitHub repository variable ${name}." | tee -a /tmp/platform-deploy.log
+          ;;
+        *)
+          expect_http_success "${code}" "${out}" "Failed to update GitHub repository variable ${name}"
+          ;;
+      esac
+    }
+
+    sync_github_variables() {
+      variables_json="${GITHUB_REPOSITORY_VARIABLES_JSON:-{}}"
+      printf '%s' "${variables_json}" | jq -e 'type == "object"' >/dev/null \
+        || fail "GITHUB_REPOSITORY_VARIABLES_JSON must be a JSON object."
+
+      printf '%s' "${variables_json}" | jq -r 'to_entries[] | @base64' | while IFS= read -r item; do
+        name="$(printf '%s' "${item}" | base64 -d | jq -r '.key')"
+        value="$(printf '%s' "${item}" | base64 -d | jq -r '.value|tostring')"
+        upsert_github_variable "${name}" "${value}"
+      done
+    }
+
+    slugify() {
+      printf '%s' "$1" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-+|-+$//g; s/(.{46}).*/\1/; s/-+$//'
+    }
+
+    require_https_url() {
+      label="$1"
+      value="$2"
+      case "${value}" in
+        https://*) return 0 ;;
+      esac
+      fail "${label} must be a valid https URL. Current value: ${value}"
+    }
+
+    derive_deploy_values() {
+      [ -n "${GITHUB_REPOSITORY:-}" ] || fail "GITHUB_REPOSITORY is required for Terraform Cloud deployments."
+      [ -n "${GITHUB_REF:-}" ] || fail "GITHUB_REF is required for Terraform Cloud deployments."
+      [ -n "${TFE_PROJECT:-}" ] || fail "TFE_PROJECT is required for Terraform Cloud deployments."
+      [ -n "${TF_API_TOKEN:-}" ] || fail "TF_API_TOKEN is required for Terraform Cloud deployments."
+      [ -n "${GITHUB_TOKEN:-}" ] || fail "GITHUB_TOKEN is required for Terraform Cloud deployments."
+
+      SOURCE_REPOSITORY="${APP_SOURCE_REPOSITORY:-}"
+      [ -n "${SOURCE_REPOSITORY}" ] || fail "App source repository is required on the platform app."
+
+      REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
+      REPO_NAME="${GITHUB_REPOSITORY#*/}"
+      [ -n "${REPO_OWNER}" ] && [ -n "${REPO_NAME}" ] && [ "${REPO_OWNER}" != "${REPO_NAME}" ] \
+        || fail "GITHUB_REPOSITORY must be owner/repo."
+
+      PROJECT_SLUG="$(slugify "${REPO_NAME}")"
+      [ -n "${PROJECT_SLUG}" ] || PROJECT_SLUG="app"
+      REALM="$(printf '%s' "${KEYCLOAK_REALM:-external}" | tr '[:upper:]' '[:lower:]' | xargs)"
+      case "${REALM}" in
+        internal|external) ;;
+        *) fail "KEYCLOAK_REALM must be either internal or external." ;;
+      esac
+
+      TF_CLOUD_ORGANIZATION="${APP_TF_CLOUD_ORGANIZATION:-${TF_CLOUD_ORGANIZATION:-${REPO_OWNER}}}"
+      TFE_AGENT_POOL_ID="${APP_TFE_AGENT_POOL_ID:-${TFE_AGENT_POOL_ID:-}}"
+      [ -n "${TFE_AGENT_POOL_ID}" ] || fail "TFE_AGENT_POOL_ID is required for Terraform Cloud workspace creation."
+      case "${TFE_AGENT_POOL_ID}" in
+        apool-*) ;;
+        *) fail "TFE_AGENT_POOL_ID must be a valid agent pool id with prefix apool-." ;;
+      esac
+
+      DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE="$(printf '%s' "${SITE_KEY:-${REALM}}" | tr '[:upper:]' '[:lower:]' | xargs)"
+      printf '%s' "${DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE}" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$' \
+        || fail "DIRECTUS_CONTENT_SITE_KEY must start with a letter or number and contain only letters, numbers, hyphens, or underscores."
+
+      APP_BASE_DOMAIN_EFFECTIVE="$(printf '%s' "${DOMAIN:-suncoast.systems}" | xargs)"
+      [ -n "${APP_BASE_DOMAIN_EFFECTIVE}" ] || APP_BASE_DOMAIN_EFFECTIVE="suncoast.systems"
+
+      DEFAULT_AUTH_GATEWAY_URL="https://login.suncoast.systems"
+      if [ "${REALM}" = "internal" ]; then
+        DEFAULT_AUTH_GATEWAY_URL="https://login-internal.suncoast.systems"
+      fi
+      APP_AUTH_GATEWAY_URL_EFFECTIVE="$(printf '%s' "${APP_AUTH_GATEWAY_URL:-${DEFAULT_AUTH_GATEWAY_URL}}" | xargs)"
+      APP_AUTH_GATEWAY_ADMIN_URL_EFFECTIVE="$(printf '%s' "${APP_AUTH_GATEWAY_ADMIN_URL:-${DEFAULT_AUTH_GATEWAY_URL}}" | xargs)"
+      APP_AUTH_GATEWAY_URL_EFFECTIVE="${APP_AUTH_GATEWAY_URL_EFFECTIVE%/}"
+      APP_AUTH_GATEWAY_ADMIN_URL_EFFECTIVE="${APP_AUTH_GATEWAY_ADMIN_URL_EFFECTIVE%/}"
+
+      APP_AUTH_BASE_URL_PRODUCTION_EFFECTIVE="$(printf '%s' "${PRODUCTION_URL:-https://${REPO_NAME}.${APP_BASE_DOMAIN_EFFECTIVE}}" | xargs)"
+      APP_AUTH_BASE_URL_PREVIEW_EFFECTIVE="$(printf '%s' "${PREVIEW_URL:-https://${REPO_NAME}-preview.${APP_BASE_DOMAIN_EFFECTIVE}}" | xargs)"
+      require_https_url "APP_AUTH_GATEWAY_URL" "${APP_AUTH_GATEWAY_URL_EFFECTIVE}"
+      require_https_url "APP_AUTH_GATEWAY_ADMIN_URL" "${APP_AUTH_GATEWAY_ADMIN_URL_EFFECTIVE}"
+      require_https_url "APP_AUTH_BASE_URL_PRODUCTION" "${APP_AUTH_BASE_URL_PRODUCTION_EFFECTIVE}"
+      require_https_url "APP_AUTH_BASE_URL_PREVIEW" "${APP_AUTH_BASE_URL_PREVIEW_EFFECTIVE}"
+
+      [ -n "${APP_AUTH_GATEWAY_ADMIN_TOKEN:-}" ] || fail "APP_AUTH_GATEWAY_ADMIN_TOKEN is required for Terraform Cloud app registration."
+
+      KEYCLOAK_AUTH_HOST_EFFECTIVE="$(printf '%s' "${KEYCLOAK_AUTH_HOST:-auth-origin.suncoast.systems}" | xargs)"
+      KEYCLOAK_AUTH_HOST_EFFECTIVE="${KEYCLOAK_AUTH_HOST_EFFECTIVE#http://}"
+      KEYCLOAK_AUTH_HOST_EFFECTIVE="${KEYCLOAK_AUTH_HOST_EFFECTIVE#https://}"
+      KEYCLOAK_AUTH_HOST_EFFECTIVE="${KEYCLOAK_AUTH_HOST_EFFECTIVE%%/*}"
+      [ -n "${KEYCLOAK_AUTH_HOST_EFFECTIVE}" ] || fail "KEYCLOAK_AUTH_HOST is invalid after normalization."
+
+      CACHE_REFRESH_AUTH_ISSUER="https://${KEYCLOAK_AUTH_HOST_EFFECTIVE}/realms/${REALM}"
+      CACHE_REFRESH_AUTH_JWKS_URL="${CACHE_REFRESH_AUTH_ISSUER}/protocol/openid-connect/certs"
+      DIRECTUS_AUTH_TOKEN_URL="${CACHE_REFRESH_AUTH_ISSUER}/protocol/openid-connect/token"
+      CACHE_REFRESH_ALLOWED_CLIENTS="cms-site-${REALM}"
+
+      APP_AUTH_APP_SLUG_PRODUCTION_EFFECTIVE="${APP_AUTH_APP_SLUG_PRODUCTION:-${PROJECT_SLUG}}"
+      APP_AUTH_APP_SLUG_PREVIEW_EFFECTIVE="${APP_AUTH_APP_SLUG_PREVIEW:-${PROJECT_SLUG}-preview}"
+      D1_DEV_CACHE_NAME="${PROJECT_SLUG}-dev-cache"
+      D1_PROD_CACHE_NAME="${PROJECT_SLUG}-prod-cache"
+      R2_DEV_MEDIA_CACHE_NAME="${PROJECT_SLUG}-dev-media-cache"
+      R2_PROD_MEDIA_CACHE_NAME="${PROJECT_SLUG}-prod-media-cache"
+      PRODUCTION_WORKSPACE="${TERRAFORM_WORKSPACE_PRODUCTION:-${REPO_NAME}}"
+      PREVIEW_WORKSPACE="${TERRAFORM_WORKSPACE_PREVIEW:-${REPO_NAME}-preview}"
+    }
+
+    clone_app_repository() {
+      SOURCE_DIR="/workspace/app-source"
+      rm -rf "${SOURCE_DIR}"
+      mkdir -p "${SOURCE_DIR}"
+
+      clone_url="https://github.com/${GITHUB_REPOSITORY}.git"
+
+      echo "[runner] Checking out app repository ${GITHUB_REPOSITORY} (${GITHUB_REF})." | tee -a /tmp/platform-deploy.log
+      basic_auth="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+      git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic_auth}" \
+        clone --depth 1 --branch "${GITHUB_REF}" "${clone_url}" "${SOURCE_DIR}" >>/tmp/platform-deploy.log 2>&1 \
+        || {
+          echo "[runner] Shallow checkout failed; retrying full checkout." | tee -a /tmp/platform-deploy.log
+          rm -rf "${SOURCE_DIR}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic_auth}" \
+            clone "${clone_url}" "${SOURCE_DIR}" >>/tmp/platform-deploy.log 2>&1
+          git -C "${SOURCE_DIR}" checkout "${GITHUB_REF}" >>/tmp/platform-deploy.log 2>&1
+        }
+      [ -d "${SOURCE_DIR}/terraform" ] || fail "The app repository must contain a terraform directory."
+    }
+
+    resolve_build_metadata() {
+      APP_BUILD_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      APP_BUILD_COMMIT="$(git -C "${SOURCE_DIR}" rev-parse --short=12 HEAD)"
+      safe_ref="$(printf '%s' "${GITHUB_REF}" | tr '/:@' '---' | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
+      op_suffix="$(printf '%s' "${OPERATION_ID}" | tr -d '-' | cut -c1-10)"
+      APP_BUILD_VERSION="${safe_ref}-$(date -u +'%Y%m%d%H%M%S')-${op_suffix}"
+    }
+
+    resolve_release_version() {
+      year="$(date -u +'%Y')"
+      month="$(date -u +'%m' | sed -E 's/^0//')"
+      prefix="${year}.${month}."
+      code="$(github_api "GET" "/repos/${GITHUB_REPOSITORY}/tags?per_page=100" "" "/tmp/github-tags.json")"
+      expect_http_success "${code}" "/tmp/github-tags.json" "Failed to list GitHub tags for release versioning"
+      max_patch="$(jq -r --arg prefix "${prefix}" '
+        [ .[]?.name
+          | select(startswith($prefix))
+          | ltrimstr($prefix)
+          | select(test("^[0-9]+$"))
+          | tonumber
+        ] | max // 0
+      ' /tmp/github-tags.json)"
+      RELEASE_VERSION="${prefix}$((max_patch + 1))"
+      export RELEASE_VERSION
+    }
+
+    build_app_artifacts() {
+      cd "${SOURCE_DIR}"
+      echo "[runner] Installing app dependencies." | tee -a /tmp/platform-deploy.log
+      npm ci >>/tmp/platform-deploy.log 2>&1
+
+      VERSION="${OPENOBSERVE_BROWSER_RUM_VERSION:-0.3.1}"
+      DEST_DIR="public/openobserve"
+      DEST_FILE="${DEST_DIR}/openobserve-rum.js"
+      CACHE_DIR="/state/openobserve-browser-rum"
+      CACHE_TARBALL="${CACHE_DIR}/${VERSION}.tgz"
+      mkdir -p "${CACHE_DIR}" "${DEST_DIR}"
+      if [ ! -f "${CACHE_TARBALL}" ]; then
+        TARBALL_URL="$(npm view "@openobserve/browser-rum@${VERSION}" dist.tarball --silent)"
+        [ -n "${TARBALL_URL}" ] || fail "Failed to resolve @openobserve/browser-rum@${VERSION} dist tarball."
+        curl -fsSL "${TARBALL_URL}" -o "${CACHE_TARBALL}" >>/tmp/platform-deploy.log 2>&1
+      fi
+      rm -rf /tmp/openobserve-browser-rum
+      mkdir -p /tmp/openobserve-browser-rum
+      tar -xzf "${CACHE_TARBALL}" -C /tmp/openobserve-browser-rum
+      [ -f "/tmp/openobserve-browser-rum/package/bundle/openobserve-rum.js" ] \
+        || fail "Expected OpenObserve browser-rum bundle was not found."
+      cp "/tmp/openobserve-browser-rum/package/bundle/openobserve-rum.js" "${DEST_FILE}"
+
+      echo "[runner] Building OpenNext worker artifacts." | tee -a /tmp/platform-deploy.log
+      npm run cf:build >>/tmp/platform-deploy.log 2>&1
+      rm -rf terraform/.open-next
+      mkdir -p terraform/.open-next
+      WRANGLER_LOG=error npx wrangler deploy --dry-run --outdir terraform/.open-next --config wrangler.jsonc --env production >>/tmp/platform-deploy.log 2>&1
+      rm -rf terraform/.open-next/assets
+      cp -R .open-next/assets terraform/.open-next/assets
+    }
+
+    tfe_lookup_project_id() {
+      org_encoded="$(urlencode "${TF_CLOUD_ORGANIZATION}")"
+      code="$(tfe_api "GET" "/organizations/${org_encoded}/projects?page%5Bsize%5D=100" "" "/tmp/tfe-projects.json")"
+      expect_http_success "${code}" "/tmp/tfe-projects.json" "Failed to list Terraform Cloud projects"
+      PROJECT_ID="$(jq -r --arg name "${TFE_PROJECT}" '
+        (.data // [])
+        | map(select((.attributes.name // "" | ascii_downcase) == ($name | ascii_downcase)))
+        | .[0].id // empty
+      ' /tmp/tfe-projects.json)"
+      if [ -z "${PROJECT_ID}" ]; then
+        PROJECT_ID="$(jq -r --arg name "${TFE_PROJECT}" '
+          (.data // [])
+          | map(select((.attributes.name // "" | ascii_downcase) | contains($name | ascii_downcase)))
+          | .[0].id // empty
+        ' /tmp/tfe-projects.json)"
+      fi
+      [ -n "${PROJECT_ID}" ] || fail "Unable to resolve Terraform Cloud project id for '${TFE_PROJECT}'."
+    }
+
+    tfe_workspace_agent_payload() {
+      jq -nc --arg agent_pool_id "${TFE_AGENT_POOL_ID}" '{
+        data:{
+          type:"workspaces",
+          attributes:{
+            "execution-mode":"agent",
+            "agent-pool-id":$agent_pool_id,
+            "setting-overwrites":{"execution-mode":true,"agent-pool":true}
+          }
+        }
+      }'
+    }
+
+    tfe_create_or_get_workspace() {
+      workspace_name="$1"
+      org_encoded="$(urlencode "${TF_CLOUD_ORGANIZATION}")"
+      workspace_encoded="$(urlencode "${workspace_name}")"
+      code="$(tfe_api "GET" "/organizations/${org_encoded}/workspaces/${workspace_encoded}" "" "/tmp/tfe-workspace.json")"
+      if [ "${code}" = "200" ]; then
+        workspace_id="$(jq -r '.data.id // empty' /tmp/tfe-workspace.json)"
+      elif [ "${code}" = "404" ]; then
+        payload="$(jq -nc \
+          --arg workspace_name "${workspace_name}" \
+          --arg project_id "${PROJECT_ID}" \
+          --arg agent_pool_id "${TFE_AGENT_POOL_ID}" '{
+            data:{
+              attributes:{
+                name:$workspace_name,
+                "execution-mode":"agent",
+                "agent-pool-id":$agent_pool_id,
+                "setting-overwrites":{"execution-mode":true,"agent-pool":true},
+                "auto-apply":true
+              },
+              type:"workspaces",
+              relationships:{project:{data:{type:"projects",id:$project_id}}}
+            }
+          }')"
+        code="$(tfe_api "POST" "/organizations/${org_encoded}/workspaces" "${payload}" "/tmp/tfe-workspace-create.json")"
+        expect_http_success "${code}" "/tmp/tfe-workspace-create.json" "Failed to create Terraform Cloud workspace ${workspace_name}"
+        workspace_id="$(jq -r '.data.id // empty' /tmp/tfe-workspace-create.json)"
+      else
+        expect_http_success "${code}" "/tmp/tfe-workspace.json" "Failed to lookup Terraform Cloud workspace ${workspace_name}"
+      fi
+      [ -n "${workspace_id}" ] || fail "Terraform Cloud did not return an id for workspace ${workspace_name}."
+
+      payload="$(tfe_workspace_agent_payload)"
+      code="$(tfe_api "PATCH" "/organizations/${org_encoded}/workspaces/${workspace_encoded}" "${payload}" "/tmp/tfe-workspace-update.json")"
+      expect_http_success "${code}" "/tmp/tfe-workspace-update.json" "Failed to enforce agent execution mode for workspace ${workspace_name}"
+      printf '%s' "${workspace_id}"
+    }
+
+    tfe_upsert_var() {
+      workspace_id="$1"
+      key="$2"
+      value="$3"
+      description="$4"
+      hcl="${5:-false}"
+      sensitive="${6:-false}"
+
+      code="$(tfe_api "GET" "/workspaces/${workspace_id}/vars" "" "/tmp/tfe-vars-${workspace_id}.json")"
+      expect_http_success "${code}" "/tmp/tfe-vars-${workspace_id}.json" "Failed to list Terraform Cloud variables for workspace ${workspace_id}"
+      var_id="$(jq -r --arg key "${key}" '(.data // []) | map(select(.attributes.key == $key and .attributes.category == "terraform")) | .[0].id // empty' "/tmp/tfe-vars-${workspace_id}.json")"
+      payload="$(jq -nc \
+        --arg key "${key}" \
+        --arg value "${value}" \
+        --arg description "${description}" \
+        --arg workspace_id "${workspace_id}" \
+        --argjson hcl "${hcl}" \
+        --argjson sensitive "${sensitive}" '{
+          data:{
+            type:"vars",
+            attributes:{key:$key,value:$value,description:$description,category:"terraform",hcl:$hcl,sensitive:$sensitive},
+            relationships:{workspace:{data:{id:$workspace_id,type:"workspaces"}}}
+          }
+        }')"
+      if [ -n "${var_id}" ]; then
+        code="$(tfe_api "PATCH" "/vars/${var_id}" "${payload}" "/tmp/tfe-var-${key}.json")"
+        expect_http_success "${code}" "/tmp/tfe-var-${key}.json" "Failed to update Terraform Cloud variable ${key}"
+      else
+        code="$(tfe_api "POST" "/vars" "${payload}" "/tmp/tfe-var-${key}.json")"
+        expect_http_success "${code}" "/tmp/tfe-var-${key}.json" "Failed to create Terraform Cloud variable ${key}"
+      fi
+    }
+
+    tfe_upsert_workspace_vars() {
+      workspace_id="$1"
+      deployment_environment="$2"
+      manage_d1="$3"
+      manage_r2="$4"
+      include_build="${5:-true}"
+
+      tfe_upsert_var "${workspace_id}" "project_name" "${REPO_NAME}" "project name"
+      tfe_upsert_var "${workspace_id}" "org_name" "${REPO_OWNER}" "organization name"
+      tfe_upsert_var "${workspace_id}" "manage_d1_resources" "${manage_d1}" "manage Cloudflare D1 resources" true
+      tfe_upsert_var "${workspace_id}" "manage_r2_resources" "${manage_r2}" "manage Cloudflare R2 resources" true
+      tfe_upsert_var "${workspace_id}" "directus_client_lookup_from_vault" "true" "resolve directus client credentials from vault" true
+      tfe_upsert_var "${workspace_id}" "cache_refresh_auth_audience_lookup_from_vault" "true" "resolve refresh auth audience from vault" true
+      tfe_upsert_var "${workspace_id}" "keycloak_realm" "${REALM}" "keycloak realm selector"
+      tfe_upsert_var "${workspace_id}" "directus_content_site_key" "${DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE}" "Directus content site key"
+      tfe_upsert_var "${workspace_id}" "directus_auth_token_url" "${DIRECTUS_AUTH_TOKEN_URL}" "directus token endpoint"
+      tfe_upsert_var "${workspace_id}" "cache_refresh_auth_issuer" "${CACHE_REFRESH_AUTH_ISSUER}" "refresh token issuer"
+      tfe_upsert_var "${workspace_id}" "cache_refresh_auth_jwks_url" "${CACHE_REFRESH_AUTH_JWKS_URL}" "refresh token JWKS URL"
+      tfe_upsert_var "${workspace_id}" "cache_refresh_auth_allowed_clients" "${CACHE_REFRESH_ALLOWED_CLIENTS}" "allowed refresh token clients"
+      tfe_upsert_var "${workspace_id}" "app_auth_gateway_url" "${APP_AUTH_GATEWAY_URL_EFFECTIVE}" "auth gateway base URL"
+      tfe_upsert_var "${workspace_id}" "app_auth_gateway_admin_url" "${APP_AUTH_GATEWAY_ADMIN_URL_EFFECTIVE}" "auth gateway admin base URL"
+      tfe_upsert_var "${workspace_id}" "app_auth_gateway_admin_token" "${APP_AUTH_GATEWAY_ADMIN_TOKEN}" "auth gateway admin bearer token" false true
+      tfe_upsert_var "${workspace_id}" "app_auth_app_slug_production" "${APP_AUTH_APP_SLUG_PRODUCTION_EFFECTIVE}" "auth gateway app slug for production login"
+      tfe_upsert_var "${workspace_id}" "app_auth_app_slug_preview" "${APP_AUTH_APP_SLUG_PREVIEW_EFFECTIVE}" "auth gateway app slug for preview login"
+      tfe_upsert_var "${workspace_id}" "app_auth_base_url_production" "${APP_AUTH_BASE_URL_PRODUCTION_EFFECTIVE}" "auth gateway base URL for production app registration"
+      tfe_upsert_var "${workspace_id}" "app_auth_base_url_preview" "${APP_AUTH_BASE_URL_PREVIEW_EFFECTIVE}" "auth gateway base URL for preview app registration"
+      tfe_upsert_var "${workspace_id}" "deployment_environment" "${deployment_environment}" "deployment environment"
+      tfe_upsert_var "${workspace_id}" "d1_dev_cache_name" "${D1_DEV_CACHE_NAME}" "preview D1 cache database name"
+      tfe_upsert_var "${workspace_id}" "d1_prod_cache_name" "${D1_PROD_CACHE_NAME}" "production D1 cache database name"
+      tfe_upsert_var "${workspace_id}" "r2_dev_media_cache_name" "${R2_DEV_MEDIA_CACHE_NAME}" "preview R2 media cache bucket name"
+      tfe_upsert_var "${workspace_id}" "r2_prod_media_cache_name" "${R2_PROD_MEDIA_CACHE_NAME}" "production R2 media cache bucket name"
+      if [ "${include_build}" = "true" ]; then
+        tfe_upsert_var "${workspace_id}" "app_build_version" "${APP_BUILD_VERSION}" "application build version"
+        tfe_upsert_var "${workspace_id}" "app_build_commit" "${APP_BUILD_COMMIT}" "application build commit"
+        tfe_upsert_var "${workspace_id}" "app_build_timestamp" "${APP_BUILD_TIMESTAMP}" "application build timestamp"
+      fi
+    }
+
+    tfe_upload_configuration() {
+      workspace_id="$1"
+      payload='{"data":{"type":"configuration-versions","attributes":{"auto-queue-runs":false}}}'
+      code="$(tfe_api "POST" "/workspaces/${workspace_id}/configuration-versions" "${payload}" "/tmp/tfe-config-version.json")"
+      expect_http_success "${code}" "/tmp/tfe-config-version.json" "Failed to create Terraform Cloud configuration version"
+      config_version_id="$(jq -r '.data.id // empty' /tmp/tfe-config-version.json)"
+      upload_url="$(jq -r '.data.attributes["upload-url"] // empty' /tmp/tfe-config-version.json)"
+      [ -n "${config_version_id}" ] && [ -n "${upload_url}" ] || fail "Terraform Cloud did not return a configuration upload URL."
+
+      tarball="/tmp/tfc-config-${workspace_id}.tgz"
+      tar -czf "${tarball}" -C "${SOURCE_DIR}/terraform" .
+      upload_code="$(curl -sS -o /tmp/tfe-config-upload.json -w '%{http_code}' \
+        -X PUT \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary @"${tarball}" \
+        "${upload_url}" 2>>/tmp/platform-deploy.log || true)"
+      expect_http_success "${upload_code}" "/tmp/tfe-config-upload.json" "Failed to upload Terraform Cloud configuration"
+      printf '%s' "${config_version_id}"
+    }
+
+    tfe_create_run() {
+      workspace_id="$1"
+      workspace_name="$2"
+      config_version_id="$3"
+      destroy="${4:-false}"
+      payload="$(jq -nc \
+        --arg workspace_id "${workspace_id}" \
+        --arg config_version_id "${config_version_id}" \
+        --arg message "Platform deploy ${OPERATION_ID} for ${APP_KEY}" \
+        --argjson destroy "${destroy}" '{
+          data:{
+            type:"runs",
+            attributes:{message:$message,"is-destroy":$destroy},
+            relationships:{
+              workspace:{data:{type:"workspaces",id:$workspace_id}},
+              "configuration-version":{data:{type:"configuration-versions",id:$config_version_id}}
+            }
+          }
+        }')"
+      code="$(tfe_api "POST" "/runs" "${payload}" "/tmp/tfe-run.json")"
+      expect_http_success "${code}" "/tmp/tfe-run.json" "Failed to create Terraform Cloud run for ${workspace_name}"
+      run_id="$(jq -r '.data.id // empty' /tmp/tfe-run.json)"
+      [ -n "${run_id}" ] || fail "Terraform Cloud did not return a run id for ${workspace_name}."
+      printf '%s' "${run_id}"
+    }
+
+    set_platform_run_ref() {
+      run_id="$1"
+      workspace_name="$2"
+      PLATFORM_DEPLOY_RUN_ID="${run_id}"
+      PLATFORM_DEPLOY_RUN_URL="https://app.terraform.io/app/${TF_CLOUD_ORGANIZATION}/workspaces/${workspace_name}/runs/${run_id}"
+      export PLATFORM_DEPLOY_RUN_ID PLATFORM_DEPLOY_RUN_URL
+    }
+
+    tfe_poll_run() {
+      run_id="$1"
+      workspace_name="$2"
+      deadline=$(( $(date +%s) + ${TERRAFORM_RUN_TIMEOUT_SECONDS:-7200} ))
+      poll_seconds="${TERRAFORM_RUN_POLL_SECONDS:-20}"
+      while :; do
+        code="$(tfe_api "GET" "/runs/${run_id}" "" "/tmp/tfe-run-${run_id}.json")"
+        expect_http_success "${code}" "/tmp/tfe-run-${run_id}.json" "Failed to read Terraform Cloud run ${run_id}"
+        run_status="$(jq -r '.data.attributes.status // empty' "/tmp/tfe-run-${run_id}.json")"
+        echo "[runner] Terraform Cloud run ${run_id} (${workspace_name}) status=${run_status:-unknown}." | tee -a /tmp/platform-deploy.log
+        case "${run_status}" in
+          applied|planned_and_finished)
+            return 0
+            ;;
+          errored|canceled|discarded|force_canceled)
+            fail "Terraform Cloud run ${run_id} ended with status '${run_status}'."
+            ;;
+        esac
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+          fail "Timed out waiting for Terraform Cloud run ${run_id}."
+        fi
+        sleep "${poll_seconds}"
+      done
+    }
+
+    create_github_release() {
+      [ "${OPERATION_TYPE:-redeploy}" = "create" ] || return 0
+      resolve_release_version
+      payload="$(jq -nc \
+        --arg tag_name "${RELEASE_VERSION}" \
+        --arg target_commitish "${GITHUB_REF}" \
+        '{tag_name:$tag_name,target_commitish:$target_commitish,name:$tag_name,draft:false,prerelease:false,generate_release_notes:true}')"
+      code="$(github_api "POST" "/repos/${GITHUB_REPOSITORY}/releases" "${payload}" "/tmp/github-release.json")"
+      case "${code}" in
+        200|201|202)
+          echo "[runner] Created GitHub release ${RELEASE_VERSION}." | tee -a /tmp/platform-deploy.log
+          ;;
+        422)
+          echo "[runner] GitHub release ${RELEASE_VERSION} already exists or cannot be created; continuing." | tee -a /tmp/platform-deploy.log
+          ;;
+        *)
+          expect_http_success "${code}" "/tmp/github-release.json" "Failed to create GitHub release ${RELEASE_VERSION}"
+          ;;
+      esac
+    }
+
+    disable_initial_workflow() {
+      [ "${OPERATION_TYPE:-redeploy}" = "create" ] || return 0
+      workflow="${GITHUB_INITIAL_WORKFLOW:-initial-deploy.yml}"
+      code="$(github_api "PUT" "/repos/${GITHUB_REPOSITORY}/actions/workflows/$(urlencode "${workflow}")/disable" "" "/tmp/github-disable-initial.json")"
+      case "${code}" in
+        200|201|202|204|404)
+          echo "[runner] Initial deploy workflow disable request completed for ${workflow} (HTTP ${code})." | tee -a /tmp/platform-deploy.log
+          ;;
+        *)
+          expect_http_success "${code}" "/tmp/github-disable-initial.json" "Failed to disable initial deploy workflow ${workflow}"
+          ;;
+      esac
+    }
+
+    run_terraform_cloud_deploy() {
+      derive_deploy_values
+      sync_github_variables
+      clone_app_repository
+      resolve_build_metadata
+      if [ "${DEPLOY_SEQUENCE:-create}" != "destroy" ]; then
+        build_app_artifacts
+      fi
+
+      tfe_lookup_project_id
+      production_workspace_id="$(tfe_create_or_get_workspace "${PRODUCTION_WORKSPACE}")"
+      preview_workspace_id="$(tfe_create_or_get_workspace "${PREVIEW_WORKSPACE}")"
+      tfe_upsert_workspace_vars "${production_workspace_id}" "production" "true" "true" "true"
+      tfe_upsert_workspace_vars "${preview_workspace_id}" "preview" "false" "false" "false"
+
+      production_config_version_id="$(tfe_upload_configuration "${production_workspace_id}")"
+      if [ "${DEPLOY_SEQUENCE:-create}" = "destroy" ]; then
+        preview_config_version_id="$(tfe_upload_configuration "${preview_workspace_id}")"
+        preview_run_id="$(tfe_create_run "${preview_workspace_id}" "${PREVIEW_WORKSPACE}" "${preview_config_version_id}" "true")"
+        set_platform_run_ref "${preview_run_id}" "${PREVIEW_WORKSPACE}"
+        tfe_poll_run "${preview_run_id}" "${PREVIEW_WORKSPACE}"
+        production_run_id="$(tfe_create_run "${production_workspace_id}" "${PRODUCTION_WORKSPACE}" "${production_config_version_id}" "true")"
+        set_platform_run_ref "${production_run_id}" "${PRODUCTION_WORKSPACE}"
+        tfe_poll_run "${production_run_id}" "${PRODUCTION_WORKSPACE}"
+      else
+        production_run_id="$(tfe_create_run "${production_workspace_id}" "${PRODUCTION_WORKSPACE}" "${production_config_version_id}" "false")"
+        set_platform_run_ref "${production_run_id}" "${PRODUCTION_WORKSPACE}"
+        tfe_poll_run "${production_run_id}" "${PRODUCTION_WORKSPACE}"
+        create_github_release
+        disable_initial_workflow
+      fi
+
+      finish "succeeded" ""
+      echo "[runner] Terraform Cloud deployment completed."
+      exit 0
+    }
+
+    [ -n "${OPERATION_ID:-}" ] || fail "OPERATION_ID is required."
+    [ -n "${APP_ID:-}" ] || fail "APP_ID is required."
+    [ -n "${APP_KEY:-}" ] || fail "APP_KEY is required."
+
+    start_body="$(jq -nc \
+      --arg app_id "${APP_ID}" \
+      --arg operation_type "${OPERATION_TYPE:-redeploy}" \
+      '{app_id:$app_id,operation_type:$operation_type}')"
+    callback "/internal/operations/${OPERATION_ID}/start" "${start_body}" || true
+
+    SOURCE_REPOSITORY="${APP_SOURCE_REPOSITORY:-}"
+    [ -n "${SOURCE_REPOSITORY:-}" ] || fail "App source repository is required on the platform app."
+
+    if [ "${DEPLOY_EXECUTION_PROVIDER:-local_terraform}" = "terraform_cloud" ]; then
+      run_terraform_cloud_deploy
+    fi
+
+    export TF_IN_AUTOMATION=true
+    export TF_INPUT=false
+    export TF_VAR_app_id="${APP_ID}"
+    export TF_VAR_app_key="${APP_KEY}"
+    export TF_VAR_site_key="${SITE_KEY:-}"
+    export TF_VAR_keycloak_realm="${KEYCLOAK_REALM:-external}"
+    export TF_VAR_domain="${DOMAIN:-}"
+    export TF_VAR_production_hostname="${PRODUCTION_HOSTNAME:-}"
+    export TF_VAR_preview_hostname="${PREVIEW_HOSTNAME:-}"
+    export TF_VAR_production_url="${PRODUCTION_URL:-}"
+    export TF_VAR_preview_url="${PREVIEW_URL:-}"
+    export TF_VAR_cloudflare_account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
+    export TF_VAR_cloudflare_zone_id="${CLOUDFLARE_ZONE_ID:-}"
+    export TF_VAR_directus_graphql_endpoint="${DIRECTUS_GRAPHQL_ENDPOINT:-}"
+    export TF_VAR_keycloak_auth_host="${KEYCLOAK_AUTH_HOST:-}"
+    export TF_VAR_app_auth_gateway_url="${APP_AUTH_GATEWAY_URL:-}"
+    export TF_VAR_app_auth_gateway_admin_url="${APP_AUTH_GATEWAY_ADMIN_URL:-}"
+    export TF_VAR_app_auth_gateway_admin_token="${APP_AUTH_GATEWAY_ADMIN_TOKEN:-}"
+    export TF_VAR_app_auth_app_slug_production="${APP_AUTH_APP_SLUG_PRODUCTION:-}"
+    export TF_VAR_app_auth_app_slug_preview="${APP_AUTH_APP_SLUG_PREVIEW:-}"
+    export TF_VAR_vault_addr="${VAULT_ADDR:-}"
+    export TF_VAR_vault_token="${VAULT_TOKEN:-}"
+
+    deploy_target() {
+      target="$1"
+      ref="$2"
+      workspace="$3"
+      action="$4"
+
+      [ -n "${ref}" ] || fail "Missing git ref for ${target}."
+      [ -n "${workspace}" ] || fail "Missing Terraform workspace for ${target}."
+
+      workdir="/workspace/${target}"
+      rm -rf "${workdir}"
+      mkdir -p "${workdir}"
+
+      echo "[runner] Checking out app source repository (${ref}) for ${target}." | tee -a /tmp/platform-deploy.log
+      git clone --depth 1 --branch "${ref}" "${SOURCE_REPOSITORY}" "${workdir}" >>/tmp/platform-deploy.log 2>&1 \
+        || {
+          echo "[runner] Shallow checkout failed; retrying full checkout." | tee -a /tmp/platform-deploy.log
+          git clone "${SOURCE_REPOSITORY}" "${workdir}" >>/tmp/platform-deploy.log 2>&1
+          git -C "${workdir}" checkout "${ref}" >>/tmp/platform-deploy.log 2>&1
+        }
+
+      if [ -d "${workdir}/terraform" ]; then
+        cd "${workdir}/terraform"
+      else
+        cd "${workdir}"
+      fi
+
+      export TF_VAR_deploy_target="${target}"
+      export TF_VAR_environment="${target}"
+      terraform init -input=false >>/tmp/platform-deploy.log 2>&1
+      terraform workspace select "${workspace}" >>/tmp/platform-deploy.log 2>&1 \
+        || terraform workspace new "${workspace}" >>/tmp/platform-deploy.log 2>&1
+
+      if [ "${action}" = "destroy" ]; then
+        terraform destroy -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1
+      else
+        terraform apply -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1
+      fi
+    }
+
+    case "${DEPLOY_SEQUENCE:-create}" in
+      destroy)
+        deploy_target "preview" "${TEMPLATE_PREVIEW_REF:-}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "destroy"
+        deploy_target "production" "${TEMPLATE_PROD_REF:-}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "destroy"
+        ;;
+      create|recreate)
+        deploy_target "preview" "${TEMPLATE_PREVIEW_REF:-}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "apply"
+        deploy_target "production" "${TEMPLATE_PROD_REF:-}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "apply"
+        ;;
+      *)
+        fail "Unsupported DEPLOY_SEQUENCE '${DEPLOY_SEQUENCE:-}'."
+        ;;
+    esac
+
+    finish "succeeded" ""
+    echo "[runner] Deployment operation completed."
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-agent-config-platform-deploy-service
+  namespace: directus
+data:
+  vault-agent.hcl: |
+    pid_file = "/vault/agent.pid"
+    exit_after_auth = false
+
+    vault {
+      address = "http://vault.vault.svc.cluster.local:8200"
+    }
+
+    auto_auth {
+      method "kubernetes" {
+        mount_path = "auth/kubernetes"
+        config = {
+          role = "directus"
+        }
+      }
+
+      sink "file" {
+        config = {
+          path = "/vault-secrets/vault-token"
+          mode = 0644
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-deploy-service
+  namespace: directus
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    reloader.stakater.com/auto: "true"
+  labels:
+    app: platform-deploy-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: platform-deploy-service
+  template:
+    metadata:
+      annotations:
+        reloader.stakater.com/auto: "true"
+      labels:
+        app: platform-deploy-service
+    spec:
+      serviceAccountName: directus
+      containers:
+        - name: vault-agent
+          image: hashicorp/vault:1.15.4
+          command: ["vault", "agent", "-config=/vault-config/vault-agent.hcl"]
+          resources:
+            requests:
+              cpu: 5m
+              memory: 24Mi
+            limits:
+              cpu: 50m
+              memory: 96Mi
+          volumeMounts:
+            - name: vault-agent-config
+              mountPath: /vault-config
+            - name: vault-secrets
+              mountPath: /vault-secrets
+        - name: platform-deploy-service
+          image: "ghcr.io/dotcomrow/platform-deploy-service:latest"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DIRECTUS_BASE_URL
+              value: "http://directus-service.directus.svc.cluster.local:8055"
+            - name: DIRECTUS_HEALTH_PATH
+              value: "/server/health"
+            - name: DIRECTUS_TOKEN_VAULT_PATH
+              value: "secret/data/directus/gravitee/openapi/admin"
+            - name: DIRECTUS_TOKEN_VAULT_KEY
+              value: "token"
+            - name: INTERNAL_TOKEN_VAULT_PATH
+              value: "secret/data/platform-deploy-service"
+            - name: INTERNAL_TOKEN_VAULT_KEY
+              value: "token"
+            - name: VAULT_ADDR
+              value: "http://vault.vault.svc.cluster.local:8200"
+            - name: VAULT_TOKEN_FILE
+              value: "/vault-secrets/vault-token"
+            - name: OPENAPI_SERVER_URL
+              value: "http://platform-deploy-service.directus.svc.cluster.local:8080"
+            - name: FLINK_REST_URL
+              value: "http://flink-rest.kafka.svc.cluster.local:8081"
+            - name: FLINK_JAR_NAME
+              value: "platform-deploy-flink-job.jar"
+            - name: FLINK_ENTRY_CLASS
+              value: "com.suncoast.platform.deploy.flink.PlatformDeployJob"
+            - name: FLINK_PARALLELISM
+              value: "1"
+            - name: PLATFORM_DEPLOY_PREPARED_TOPIC
+              value: "batch.platform.deploy.prepared.v1"
+            - name: PLATFORM_DEPLOY_SERVICE_URL
+              value: "http://platform-deploy-service.directus.svc.cluster.local:8080"
+            - name: OPERATION_CALLBACK_TOKEN_TTL_SECONDS
+              value: "21600"
+            - name: GITHUB_API_BASE
+              value: "https://api.github.com"
+            - name: DEFAULT_INITIAL_DEPLOY_WORKFLOW
+              value: "initial-deploy.yml"
+            - name: DEFAULT_GITHUB_PRODUCTION_REF
+              value: "prod"
+            - name: DEFAULT_GITHUB_PREVIEW_REF
+              value: "dev"
+            - name: TFE_API_BASE
+              value: "https://app.terraform.io/api/v2"
+            - name: TERRAFORM_RUN_TIMEOUT_SECONDS
+              value: "7200"
+            - name: TERRAFORM_RUN_POLL_SECONDS
+              value: "20"
+            - name: DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION
+              value: "0.3.1"
+            - name: REQUEST_TIMEOUT_MS
+              value: "15000"
+            - name: RATE_MAX
+              value: "60"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 384Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: vault-secrets
+              mountPath: /vault-secrets
+      volumes:
+        - name: vault-agent-config
+          configMap:
+            name: vault-agent-config-platform-deploy-service
+        - name: vault-secrets
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-deploy-service
+  namespace: directus
+  annotations:
+    gravitee.io/expose: "true"
+    gravitee.io/context-path: "/platform-deploy"
+    gravitee.io/auth-required: "directus-token"
+    gravitee.io/approval-required: "admin"
+    gravitee.io/token-exchange-target: "<path:secret/data/keycloak-client-id-graphql-api#value>"
+    gravitee.io/description: "Internal platform app deployment control plane"
+    gravitee.io/version: "latest"
+    gravitee.io/tags: "directus,cms,hasura,platform,deploy,terraform"
+    gravitee.io/definition-name: "platform-deploy-api"
+    gravitee.io/definition-summary: "Platform deploy API"
+    gravitee.io/definition-description: "Queues and executes Kubernetes-hosted deployment jobs for Directus-managed shell applications."
+    gravitee.io/definition-type: "HTTP"
+    gravitee.io/definition-visibility: "PUBLIC"
+    gravitee.io/definition-state: "STARTED"
+    gravitee.io/definition-lifecycle-state: "PUBLISHED"
+    gravitee.io/definition-openapi-url: "http://platform-deploy-service.directus.svc.cluster.local:8080/openapi.json"
+    gravitee.io/definition-context-path: "/platform-deploy"
+    gravitee.io/definition-version: "latest"
+    gravitee.io/definition-listener-host: "platform-deploy-service.directus.svc.cluster.local"
+    gravitee.io/definition-listener-port: "8080"
+    gravitee.io/definition-groups: "cms"
+    gravitee.io/definition-tags: "directus,cms,hasura,platform,deploy,terraform"
+    gravitee.io/definition-labels: "internal,cms,hasura,platform,deploy"
+    gravitee.io/definition-categories: "infra"
+    gravitee.io/definition-path-mappings: "/platform-deploy/*"
+    gravitee.io/definition-metadata: '{"owner":"infra","service":"platform-deploy","slack":"#infra"}'
+    gravitee.io/definition-properties: '{"tier":"prod","region":"us-central1","token_exchange_url":"http://directus-auth-bridge.directus.svc.cluster.local:8080/token","token_exchange_client_id":"<path:secret/data/keycloak-client-id-graphql-api#value>","token_exchange_client_secret":"<path:secret/data/keycloak-client-secret-graphql-api#value>"}'
+    gravitee.io/definition-endpoint-groups: '[{"name":"default","type":"http-proxy","sharedConfiguration":{"http":{"version":"HTTP_1_1","connectTimeout":30000,"readTimeout":120000,"idleTimeout":120000,"keepAlive":true,"keepAliveTimeout":30000,"pipelining":false,"useCompression":false,"propagateClientAcceptEncoding":false,"followRedirects":false,"maxConcurrentConnections":5}},"services":{"healthCheck":{"enabled":true,"overrideConfiguration":true,"type":"http-health-check","configuration":{"schedule":"*/30 * * * * *","target":"/healthz","method":"GET","overrideEndpointPath":true,"headers":[],"assertion":"{#response.status == 200}","successThreshold":2,"failureThreshold":2}}},"endpoints":[{"name":"platform-deploy-http","type":"http-proxy","inheritConfiguration":true,"weight":1,"configuration":{"target":"http://platform-deploy-service.directus.svc.cluster.local:8080"},"secondary":false}]}]'
+    gravitee.io/definition-pages: '{"swagger":{"type":"SWAGGER","name":"openapi","published":true,"visibility":"PUBLIC","homepage":false,"source":{"type":"http-fetcher","configuration":{"url":"http://platform-deploy-service.directus.svc.cluster.local:8080/openapi.json","autoFetch":true,"fetchCron":"0 */5 * * * *","useSystemProxy":false}}}}'
+    gravitee.io/definition-resources: '[]'
+    gravitee.io/definition-plans: '{"open-access":{"name":"Open access","description":"Platform deploy API access is enforced by GraphQL/Gravitee auth","security":{"type":"KEY_LESS"},"status":"PUBLISHED","validation":"AUTO","type":"API","selectionRule":"true"}}'
+    gravitee.io/definition-flows: '[]'
+    gravitee.io/definition-response-templates: '{}'
+    gravitee.io/definition-analytics: '{"enabled":true,"logging":{"condition":"true","content":{"headers":true,"payload":false,"messageHeaders":false,"messageMetadata":false,"messagePayload":false},"mode":{"entrypoint":true,"endpoint":true},"phase":{"request":true,"response":true}}}'
+    gravitee.io/definition-entrypoints: '[]'
+  labels:
+    app: platform-deploy-service
+spec:
+  selector:
+    app: platform-deploy-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

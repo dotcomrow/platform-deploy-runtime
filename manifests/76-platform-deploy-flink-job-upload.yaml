@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: platform-deploy-flink-job-upload
+  namespace: directus
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: platform-deploy-flink-job-upload
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: upload
+          image: ghcr.io/dotcomrow/platform-deploy-flink-job:latest
+          imagePullPolicy: Always
+          env:
+            - name: FLINK_REST_URL
+              value: "http://flink-rest.kafka.svc.cluster.local:8081"
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              FLINK_REST_URL="${FLINK_REST_URL%/}"
+              echo "Waiting for Flink REST at ${FLINK_REST_URL}..."
+              ready="false"
+              for _ in $(seq 1 120); do
+                if curl -fsS "${FLINK_REST_URL}/overview" >/dev/null; then
+                  ready="true"
+                  break
+                fi
+                sleep 2
+              done
+              if [ "${ready}" != "true" ]; then
+                echo "Flink REST did not become ready."
+                exit 1
+              fi
+
+              echo "Uploading platform-deploy-flink-job.jar..."
+              curl -fsS -X POST \
+                -H "Expect:" \
+                -F "jarfile=@/opt/flink/usrlib/platform-deploy-flink-job.jar" \
+                "${FLINK_REST_URL}/jars/upload"
+              echo
+              echo "Platform deploy Flink job jar uploaded."
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi

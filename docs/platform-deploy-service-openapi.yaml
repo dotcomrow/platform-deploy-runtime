@@ -1,0 +1,121 @@
+openapi: 3.0.3
+info:
+  title: Platform Deploy API
+  version: 1.0.0
+  description: Internal Kubernetes control plane for Directus-managed shell app deployments.
+servers:
+  - url: http://platform-deploy-service.directus.svc.cluster.local:8080
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        "200":
+          description: Service health
+  /readyz:
+    get:
+      operationId: readyz
+      responses:
+        "200":
+          description: Dependency readiness
+  /internal/apps/{id}/deploy:
+    post:
+      operationId: queueDeploy
+      parameters:
+        - $ref: "#/components/parameters/AppIdPath"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueueDeployRequest"
+      responses:
+        "200":
+          description: Deploy queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueOperationResponse"
+        "422":
+          description: Deploy configuration is incomplete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /internal/apps/{id}/destroy:
+    post:
+      operationId: queueDestroy
+      parameters:
+        - $ref: "#/components/parameters/AppIdPath"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueueDestroyRequest"
+      responses:
+        "200":
+          description: Destroy queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueOperationResponse"
+components:
+  parameters:
+    AppIdPath:
+      name: id
+      in: path
+      required: true
+      description: Directus platform_apps id.
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    QueueDeployRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        operation_type:
+          type: string
+          enum:
+            - create
+            - update
+            - redeploy
+          description: Deployment operation to queue.
+    QueueDestroyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        operation_type:
+          type: string
+          enum:
+            - destroy
+            - delete
+          description: Destroy operation to queue.
+    QueueOperationResponse:
+      type: object
+      required:
+        - ok
+        - app_id
+        - operation_id
+        - job_name
+      additionalProperties: true
+      properties:
+        ok:
+          type: boolean
+        app_id:
+          type: string
+        operation_id:
+          type: string
+        job_name:
+          type: string
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            status:
+              type: integer
