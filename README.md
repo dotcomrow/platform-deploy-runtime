@@ -19,6 +19,15 @@ flow stays in `dataflow-platform-deploy-app`.
 - `docs/platform-deploy-service-openapi.yaml` - static OpenAPI copy for the
   deploy service contract.
 
+## Image Publishing
+
+The GitHub Actions image workflows publish to GHCR using the repository
+`GITHUB_TOKEN` by default. If GHCR rejects the push with `write_package`, add a
+repository secret named `GHCR_PAT` with `write:packages` access and, when the PAT
+owner is not the workflow actor, a `GHCR_USER` secret containing that username.
+For existing org packages, the package must also grant this repository write
+access under the package's Actions access settings.
+
 ## Deployment Flow
 
 1. Internal Organization Management creates or updates a `platform_apps` row in
