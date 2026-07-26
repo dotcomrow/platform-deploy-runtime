@@ -53,6 +53,12 @@ mvn -B -ntp package
 Secrets are resolved at runtime from Vault/Kubernetes. Do not commit secret
 values to this repo.
 
+`platform-deploy-service` accepts either its service-internal token from
+`secret/data/platform-deploy-service#token` or the configured Directus service
+token from `secret/data/directus/gravitee/openapi/admin#token`. The Directus
+token path is used by Gravitee token exchange when browser-originated Hasura
+actions call the deploy API through the existing gateway path.
+
 `POST /internal/secrets/platform-deploy` writes the deploy executor credentials
 to Vault paths `secret/data/platform-deploy-service` and
 `secret/data/platform-deploy-service/github`. The service merges the submitted

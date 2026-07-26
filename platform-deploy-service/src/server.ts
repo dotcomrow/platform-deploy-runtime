@@ -354,6 +354,19 @@ async function internalToken(): Promise<string> {
   return vaultValue(env.INTERNAL_TOKEN_VAULT_PATH, env.INTERNAL_TOKEN_VAULT_KEY);
 }
 
+async function acceptedServiceAuthTokens(): Promise<string[]> {
+  const tokens = new Set<string>();
+  const expectedInternal = await internalToken();
+  if (expectedInternal) {
+    tokens.add(expectedInternal);
+  }
+  const expectedDirectus = await directusToken();
+  if (expectedDirectus) {
+    tokens.add(expectedDirectus);
+  }
+  return [...tokens];
+}
+
 async function directusJson<T>(path: string, init: { method?: Dispatcher.HttpMethod; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
   const token = await directusToken();
   const result = await httpJson<unknown>(`${DIRECTUS_BASE_URL}${path}`, {
@@ -833,21 +846,21 @@ async function submitFlinkPrepareJob(
 }
 
 async function enforceInternalAuth(req: Request): Promise<void> {
-  const expected = await internalToken();
-  if (!expected) {
+  const expectedTokens = await acceptedServiceAuthTokens();
+  if (!expectedTokens.length) {
     return;
   }
   const actual = asString(req.header("authorization"));
-  if (!safeEqual(actual, `Bearer ${expected}`)) {
+  if (!expectedTokens.some((token) => safeEqual(actual, `Bearer ${token}`))) {
     throw Object.assign(new Error("Unauthorized"), { status: 401 });
   }
 }
 
 async function enforceInternalOrOperationAuth(req: Request, operationId: string): Promise<PlatformOperation> {
   const operation = await getOperation(operationId);
-  const expectedInternal = await internalToken();
+  const expectedTokens = await acceptedServiceAuthTokens();
   const authorization = asString(req.header("authorization"));
-  if (!expectedInternal || safeEqual(authorization, `Bearer ${expectedInternal}`)) {
+  if (!expectedTokens.length || expectedTokens.some((token) => safeEqual(authorization, `Bearer ${token}`))) {
     return operation;
   }
 
