@@ -143,7 +143,6 @@ components:
         - cloudflare_token
         - cloudflare_account_id
         - cloudflare_zone_id
-        - app_auth_gateway_admin_token
         - github_token
       additionalProperties: false
       properties:
@@ -163,9 +162,6 @@ components:
           type: string
           minLength: 1
         cloudflare_zone_id:
-          type: string
-          minLength: 1
-        app_auth_gateway_admin_token:
           type: string
           minLength: 1
         github_token:

@@ -122,7 +122,6 @@ type PlatformDeploySecretsInput = {
   cloudflare_token: string;
   cloudflare_account_id: string;
   cloudflare_zone_id: string;
-  app_auth_gateway_admin_token: string;
   github_token: string;
 };
 
@@ -324,7 +323,6 @@ function platformDeploySecretsInput(body: JsonRecord): PlatformDeploySecretsInpu
     cloudflare_token: asString(candidate.cloudflare_token),
     cloudflare_account_id: asString(candidate.cloudflare_account_id),
     cloudflare_zone_id: asString(candidate.cloudflare_zone_id),
-    app_auth_gateway_admin_token: asString(candidate.app_auth_gateway_admin_token),
     github_token: asString(candidate.github_token)
   };
   const missing = Object.entries(input)
@@ -1011,7 +1009,6 @@ const openApiSpec = {
           "cloudflare_token",
           "cloudflare_account_id",
           "cloudflare_zone_id",
-          "app_auth_gateway_admin_token",
           "github_token"
         ],
         additionalProperties: false,
@@ -1022,7 +1019,6 @@ const openApiSpec = {
           cloudflare_token: { type: "string", minLength: 1 },
           cloudflare_account_id: { type: "string", minLength: 1 },
           cloudflare_zone_id: { type: "string", minLength: 1 },
-          app_auth_gateway_admin_token: { type: "string", minLength: 1 },
           github_token: { type: "string", minLength: 1 }
         }
       },
@@ -1223,8 +1219,7 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
       tfe_organization: input.tfe_organization,
       cloudflare_token: input.cloudflare_token,
       cloudflare_account_id: input.cloudflare_account_id,
-      cloudflare_zone_id: input.cloudflare_zone_id,
-      app_auth_gateway_admin_token: input.app_auth_gateway_admin_token
+      cloudflare_zone_id: input.cloudflare_zone_id
     });
     await writeVaultKv2Data("secret/data/platform-deploy-service/github", {
       token: input.github_token,
@@ -1243,7 +1238,6 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
         "cloudflare_token",
         "cloudflare_account_id",
         "cloudflare_zone_id",
-        "app_auth_gateway_admin_token",
         "github_token"
       ]
     });
