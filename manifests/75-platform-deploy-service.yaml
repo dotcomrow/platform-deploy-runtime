@@ -97,6 +97,51 @@ spec:
               VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
               SECRET_PATH="secret/data/platform-deploy-service"
 
+              cat >/tmp/platform-deploy-service-policy.hcl <<'EOF'
+              path "secret/data/platform-deploy-service" {
+                capabilities = ["create", "read", "update"]
+              }
+
+              path "secret/data/platform-deploy-service/*" {
+                capabilities = ["create", "read", "update"]
+              }
+
+              path "secret/data/directus/gravitee/clients/*" {
+                capabilities = ["read"]
+              }
+              EOF
+
+              policy_payload="$(jq -Rs '{policy:.}' /tmp/platform-deploy-service-policy.hcl)"
+              policy_code="$(curl -sS -o /tmp/platform-deploy-service-policy-write.json -w '%{http_code}' \
+                -X PUT \
+                -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "${policy_payload}" \
+                "${VAULT_ADDR}/v1/sys/policies/acl/platform-deploy-service" || true)"
+              if [ "${policy_code}" != "200" ] && [ "${policy_code}" != "204" ]; then
+                echo "Failed to write platform-deploy-service Vault policy (HTTP ${policy_code})."
+                cat /tmp/platform-deploy-service-policy-write.json || true
+                exit 1
+              fi
+
+              role_payload="$(jq -nc '{
+                bound_service_account_names:["platform-deploy-service"],
+                bound_service_account_namespaces:["directus"],
+                token_policies:["platform-deploy-service"],
+                token_ttl:"24h"
+              }')"
+              role_code="$(curl -sS -o /tmp/platform-deploy-service-role-write.json -w '%{http_code}' \
+                -X POST \
+                -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "${role_payload}" \
+                "${VAULT_ADDR}/v1/auth/kubernetes/role/platform-deploy-service" || true)"
+              if [ "${role_code}" != "200" ] && [ "${role_code}" != "204" ]; then
+                echo "Failed to write platform-deploy-service Vault Kubernetes auth role (HTTP ${role_code})."
+                cat /tmp/platform-deploy-service-role-write.json || true
+                exit 1
+              fi
+
               code="$(curl -sS -o /tmp/platform-deploy-token.json -w '%{http_code}' \
                 -H "X-Vault-Token: ${VAULT_TOKEN}" \
                 "${VAULT_ADDR}/v1/${SECRET_PATH}" || true)"
