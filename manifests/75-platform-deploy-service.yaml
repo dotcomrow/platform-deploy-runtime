@@ -1033,7 +1033,7 @@ spec:
             - name: DIRECTUS_HEALTH_PATH
               value: "/server/health"
             - name: DIRECTUS_TOKEN_VAULT_PATH
-              value: "secret/data/directus/gravitee/openapi/admin"
+              value: "secret/data/directus/gravitee/clients/<path:secret/data/keycloak-client-id-graphql-api#value>"
             - name: DIRECTUS_TOKEN_VAULT_KEY
               value: "token"
             - name: INTERNAL_TOKEN_VAULT_PATH
