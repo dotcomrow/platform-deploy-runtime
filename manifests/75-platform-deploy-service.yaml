@@ -96,6 +96,7 @@ spec:
               VAULT_ADDR="http://vault.vault.svc.cluster.local:8200"
               VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
               SECRET_PATH="secret/data/platform-deploy-service"
+              AUTH_SECRET_PATH="secret/data/platform-deploy-service/auth"
 
               cat >/tmp/platform-deploy-service-policy.hcl <<'EOF'
               path "secret/data/platform-deploy-service" {
@@ -106,7 +107,7 @@ spec:
                 capabilities = ["create", "read", "update"]
               }
 
-              path "secret/data/directus/gravitee/clients/*" {
+              path "secret/data/directus/gravitee/openapi/admin" {
                 capabilities = ["read"]
               }
               EOF
@@ -153,7 +154,6 @@ spec:
                 tfe_token="$(jq -r '.data.data.tfe_token // .data.data["tfe-token"] // .data.data.tf_api_token // empty' /tmp/platform-deploy-token.json)"
                 tfe_agent_pool_id="$(jq -r '.data.data.tfe_agent_pool_id // .data.data["tfe-agent-pool-id"] // empty' /tmp/platform-deploy-token.json)"
                 tfe_organization="$(jq -r '.data.data.tfe_organization // .data.data["tfe-organization"] // .data.data.tf_cloud_organization // empty' /tmp/platform-deploy-token.json)"
-                app_auth_gateway_admin_token="$(jq -r '.data.data.app_auth_gateway_admin_token // .data.data["app-auth-gateway-admin-token"] // empty' /tmp/platform-deploy-token.json)"
               else
                 service_token=""
                 existing_secret_data="{}"
@@ -161,16 +161,14 @@ spec:
                 tfe_token=""
                 tfe_agent_pool_id=""
                 tfe_organization=""
-                app_auth_gateway_admin_token=""
               fi
 
-              if [ -z "${app_auth_gateway_admin_token}" ] || [ "${app_auth_gateway_admin_token}" = "null" ]; then
-                auth_gateway_code="$(curl -sS -o /tmp/auth-gateway-admin-token.json -w '%{http_code}' \
-                  -H "X-Vault-Token: ${VAULT_TOKEN}" \
-                  "${VAULT_ADDR}/v1/secret/data/auth-gateway-admin-api" || true)"
-                if [ "${auth_gateway_code}" = "200" ]; then
-                  app_auth_gateway_admin_token="$(jq -r '.data.data.value // empty' /tmp/auth-gateway-admin-token.json)"
-                fi
+              app_auth_gateway_admin_token=""
+              auth_gateway_code="$(curl -sS -o /tmp/auth-gateway-admin-token.json -w '%{http_code}' \
+                -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                "${VAULT_ADDR}/v1/secret/data/auth-gateway-admin-api" || true)"
+              if [ "${auth_gateway_code}" = "200" ]; then
+                app_auth_gateway_admin_token="$(jq -r '.data.data.value // empty' /tmp/auth-gateway-admin-token.json)"
               fi
 
               if [ -z "${service_token}" ] || [ "${service_token}" = "null" ]; then
@@ -187,6 +185,19 @@ spec:
                   cat /tmp/platform-deploy-token-write.json || true
                   exit 1
                 fi
+              fi
+
+              auth_payload="$(jq -nc --arg token "${service_token}" '{data:{token:$token}}')"
+              auth_write_code="$(curl -sS -o /tmp/platform-deploy-auth-token-write.json -w '%{http_code}' \
+                -X POST \
+                -H "X-Vault-Token: ${VAULT_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "${auth_payload}" \
+                "${VAULT_ADDR}/v1/${AUTH_SECRET_PATH}" || true)"
+              if [ "${auth_write_code}" != "200" ] && [ "${auth_write_code}" != "204" ]; then
+                echo "Failed to write ${AUTH_SECRET_PATH} to Vault (HTTP ${auth_write_code})."
+                cat /tmp/platform-deploy-auth-token-write.json || true
+                exit 1
               fi
 
               if [ -z "${github_token}" ] || [ "${github_token}" = "null" ]; then
@@ -240,7 +251,7 @@ spec:
                 kubectl -n directus patch secret platform-deploy-secrets --type merge -p "${auth_gateway_patch}"
                 echo "Auth gateway admin token from Vault is present in Kubernetes Secret."
               else
-                echo "Auth gateway admin token was not found in Vault; terraform_cloud platform deploys require platform-deploy-secrets.app-auth-gateway-admin-token."
+                echo "Auth gateway admin token was not found in secret/data/auth-gateway-admin-api; terraform_cloud platform deploys require that internal Vault secret."
               fi
 
               echo "platform-deploy-service token is present in Vault and Kubernetes Secret."
@@ -1044,7 +1055,7 @@ spec:
   template:
     metadata:
       annotations:
-        platform.suncoast.systems/restart-revision: "2026-07-28-readyz-vault-policy"
+        platform.suncoast.systems/restart-revision: "2026-07-28-action-service-token"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
@@ -1079,7 +1090,7 @@ spec:
             - name: DIRECTUS_HEALTH_PATH
               value: "/server/health"
             - name: DIRECTUS_TOKEN_VAULT_PATH
-              value: "secret/data/directus/gravitee/clients/<path:secret/data/keycloak-client-id-graphql-api#value>"
+              value: "secret/data/directus/gravitee/openapi/admin"
             - name: DIRECTUS_TOKEN_VAULT_KEY
               value: "token"
             - name: INTERNAL_TOKEN_VAULT_PATH

@@ -292,10 +292,13 @@ async function vaultKv2Data(path: string): Promise<JsonRecord> {
   return asRecord(data.data) ?? data;
 }
 
-async function writeVaultKv2Data(path: string, patch: JsonRecord): Promise<void> {
+async function writeVaultKv2Data(path: string, patch: JsonRecord, removeKeys: string[] = []): Promise<void> {
   const token = await vaultToken();
   const normalizedPath = path.replace(/^\/+/, "").replace(/^v1\//, "");
   const existing = await vaultKv2Data(path);
+  for (const key of removeKeys) {
+    delete existing[key];
+  }
   const nextData = {
     ...existing,
     ...patch
@@ -309,7 +312,7 @@ async function writeVaultKv2Data(path: string, patch: JsonRecord): Promise<void>
   if (result.statusCode >= 400) {
     throw new Error(`Vault write ${path} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
   }
-  for (const key of Object.keys(patch)) {
+  for (const key of [...Object.keys(patch), ...removeKeys]) {
     vaultCache.delete(`${path}#${key}`);
   }
 }
@@ -360,9 +363,13 @@ async function acceptedServiceAuthTokens(): Promise<string[]> {
   if (expectedInternal) {
     tokens.add(expectedInternal);
   }
-  const expectedDirectus = await directusToken();
-  if (expectedDirectus) {
-    tokens.add(expectedDirectus);
+  try {
+    const expectedDirectus = await directusToken();
+    if (expectedDirectus) {
+      tokens.add(expectedDirectus);
+    }
+  } catch (error) {
+    console.warn(`[platform-deploy-service] directus auth token unavailable: ${error instanceof Error ? truncate(error.message, 500) : "unknown error"}`);
   }
   return [...tokens];
 }
@@ -848,7 +855,7 @@ async function submitFlinkPrepareJob(
 async function enforceInternalAuth(req: Request): Promise<void> {
   const expectedTokens = await acceptedServiceAuthTokens();
   if (!expectedTokens.length) {
-    return;
+    throw Object.assign(new Error("Internal auth is not configured."), { status: 503 });
   }
   const actual = asString(req.header("authorization"));
   if (!expectedTokens.some((token) => safeEqual(actual, `Bearer ${token}`))) {
@@ -860,7 +867,7 @@ async function enforceInternalOrOperationAuth(req: Request, operationId: string)
   const operation = await getOperation(operationId);
   const expectedTokens = await acceptedServiceAuthTokens();
   const authorization = asString(req.header("authorization"));
-  if (!expectedTokens.length || expectedTokens.some((token) => safeEqual(authorization, `Bearer ${token}`))) {
+  if (expectedTokens.some((token) => safeEqual(authorization, `Bearer ${token}`))) {
     return operation;
   }
 
@@ -1255,7 +1262,7 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
       cloudflare_token: input.cloudflare_token,
       cloudflare_account_id: input.cloudflare_account_id,
       cloudflare_zone_id: input.cloudflare_zone_id
-    });
+    }, ["app_auth_gateway_admin_token", "app-auth-gateway-admin-token"]);
     await writeVaultKv2Data("secret/data/platform-deploy-service/github", {
       token: input.github_token,
       github_token: input.github_token
