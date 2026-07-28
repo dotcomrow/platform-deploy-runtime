@@ -1170,29 +1170,51 @@ app.get("/healthz", (_req, res) => {
 });
 
 app.get("/readyz", async (_req, res) => {
+  const dependencies: JsonRecord = {};
+
+  try {
+    await internalToken();
+    dependencies.internal_token = { ok: true };
+  } catch (error) {
+    res.status(503).json({
+      ok: false,
+      reason: "internal_token_unavailable",
+      dependencies,
+      error: error instanceof Error ? truncate(error.message, 500) : "Unknown internal token readiness error"
+    });
+    return;
+  }
+
   try {
     const token = await directusToken();
     const result = await httpJson<unknown>(`${DIRECTUS_BASE_URL}${DIRECTUS_HEALTH_PATH}`, {
       headers: { authorization: `Bearer ${token}` },
       timeoutMs: REQUEST_TIMEOUT_MS
     });
-    if (result.statusCode >= 400) {
-      res.status(503).json({ ok: false, reason: "directus_health_failed", status: result.statusCode });
-      return;
-    }
-    const flinkResult = await httpJson<unknown>(`${FLINK_REST_URL}/overview`, { timeoutMs: REQUEST_TIMEOUT_MS });
-    if (flinkResult.statusCode >= 400) {
-      res.status(503).json({ ok: false, reason: "flink_health_failed", status: flinkResult.statusCode });
-      return;
-    }
-    res.status(200).json({ ok: true, directus_base_url: DIRECTUS_BASE_URL, flink_rest_url: FLINK_REST_URL });
+    dependencies.directus = { ok: result.statusCode < 400, status: result.statusCode };
   } catch (error) {
-    res.status(503).json({
+    dependencies.directus = {
       ok: false,
-      reason: "platform_deploy_dependency_failed",
-      error: error instanceof Error ? truncate(error.message, 500) : "Unknown readiness error"
-    });
+      error: error instanceof Error ? truncate(error.message, 500) : "Unknown Directus readiness error"
+    };
   }
+
+  try {
+    const flinkResult = await httpJson<unknown>(`${FLINK_REST_URL}/overview`, { timeoutMs: REQUEST_TIMEOUT_MS });
+    dependencies.flink = { ok: flinkResult.statusCode < 400, status: flinkResult.statusCode };
+  } catch (error) {
+    dependencies.flink = {
+      ok: false,
+      error: error instanceof Error ? truncate(error.message, 500) : "Unknown Flink readiness error"
+    };
+  }
+
+  res.status(200).json({
+    ok: true,
+    directus_base_url: DIRECTUS_BASE_URL,
+    flink_rest_url: FLINK_REST_URL,
+    dependencies
+  });
 });
 
 app.get("/openapi.json", (_req, res) => {

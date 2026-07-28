@@ -1044,6 +1044,7 @@ spec:
   template:
     metadata:
       annotations:
+        platform.suncoast.systems/restart-revision: "2026-07-28-readyz-vault-policy"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
