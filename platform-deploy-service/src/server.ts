@@ -16,7 +16,7 @@ const envSchema = z.object({
   DIRECTUS_BASE_URL: z.string().default("http://directus-service.directus.svc.cluster.local:8055"),
   DIRECTUS_HEALTH_PATH: z.string().default("/server/health"),
   DIRECTUS_STATIC_TOKEN: z.string().default(""),
-  DIRECTUS_TOKEN_VAULT_PATH: z.string().default("secret/data/directus/gravitee/openapi/admin"),
+  DIRECTUS_TOKEN_VAULT_PATH: z.string().default("secret/data/directus/gravitee/clients/<path:secret/data/keycloak-client-id-graphql-api#value>"),
   DIRECTUS_TOKEN_VAULT_KEY: z.string().default("token"),
   INTERNAL_TOKEN: z.string().default(""),
   INTERNAL_TOKEN_VAULT_PATH: z.string().default("secret/data/platform-deploy-service"),
@@ -54,6 +54,7 @@ const DIRECTUS_HEALTH_PATH = env.DIRECTUS_HEALTH_PATH.startsWith("/")
   : `/${env.DIRECTUS_HEALTH_PATH}`;
 const VAULT_ADDR = env.VAULT_ADDR.replace(/\/+$/, "");
 const TOKEN_CACHE_SECONDS = Math.max(5, Number(env.TOKEN_CACHE_SECONDS) || 300);
+const VAULT_PATH_REF_PATTERN = /<path:([^#>]+)#([^>]+)>/g;
 const FLINK_REST_URL = env.FLINK_REST_URL.replace(/\/+$/, "");
 const FLINK_PARALLELISM = Math.max(1, Number(env.FLINK_PARALLELISM) || 1);
 const OPERATION_CALLBACK_TOKEN_TTL_SECONDS = Math.max(300, Number(env.OPERATION_CALLBACK_TOKEN_TTL_SECONDS) || 21_600);
@@ -243,7 +244,7 @@ async function vaultToken(): Promise<string> {
   return token.trim();
 }
 
-async function vaultValue(path: string, key: string): Promise<string> {
+async function vaultValueRaw(path: string, key: string): Promise<string> {
   const cacheKey = `${path}#${key}`;
   const cached = vaultCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
@@ -274,9 +275,30 @@ async function vaultValue(path: string, key: string): Promise<string> {
   return value;
 }
 
+async function resolveVaultPath(path: string): Promise<string> {
+  const matches = [...path.matchAll(VAULT_PATH_REF_PATTERN)];
+  if (!matches.length) {
+    return path;
+  }
+  let resolved = path;
+  for (const match of matches) {
+    const token = match[0];
+    const refPath = match[1];
+    const refKey = match[2];
+    const refValue = await vaultValueRaw(refPath, refKey);
+    resolved = resolved.replace(token, refValue);
+  }
+  return resolved;
+}
+
+async function vaultValue(path: string, key: string): Promise<string> {
+  return vaultValueRaw(await resolveVaultPath(path), key);
+}
+
 async function vaultKv2Data(path: string): Promise<JsonRecord> {
   const token = await vaultToken();
-  const normalizedPath = path.replace(/^\/+/, "").replace(/^v1\//, "");
+  const resolvedPath = await resolveVaultPath(path);
+  const normalizedPath = resolvedPath.replace(/^\/+/, "").replace(/^v1\//, "");
   const result = await httpJson<JsonRecord>(`${VAULT_ADDR}/v1/${normalizedPath}`, {
     headers: { "x-vault-token": token },
     timeoutMs: REQUEST_TIMEOUT_MS
@@ -285,7 +307,7 @@ async function vaultKv2Data(path: string): Promise<JsonRecord> {
     return {};
   }
   if (result.statusCode >= 400) {
-    throw new Error(`Vault read ${path} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
+    throw new Error(`Vault read ${resolvedPath} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
   }
   const payload = asRecord(result.payload) ?? {};
   const data = asRecord(payload.data) ?? {};
@@ -294,7 +316,8 @@ async function vaultKv2Data(path: string): Promise<JsonRecord> {
 
 async function writeVaultKv2Data(path: string, patch: JsonRecord, removeKeys: string[] = []): Promise<void> {
   const token = await vaultToken();
-  const normalizedPath = path.replace(/^\/+/, "").replace(/^v1\//, "");
+  const resolvedPath = await resolveVaultPath(path);
+  const normalizedPath = resolvedPath.replace(/^\/+/, "").replace(/^v1\//, "");
   const existing = await vaultKv2Data(path);
   for (const key of removeKeys) {
     delete existing[key];
@@ -310,10 +333,10 @@ async function writeVaultKv2Data(path: string, patch: JsonRecord, removeKeys: st
     timeoutMs: REQUEST_TIMEOUT_MS
   });
   if (result.statusCode >= 400) {
-    throw new Error(`Vault write ${path} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
+    throw new Error(`Vault write ${resolvedPath} failed: ${result.statusCode} ${truncate(result.text, 500)}`);
   }
   for (const key of [...Object.keys(patch), ...removeKeys]) {
-    vaultCache.delete(`${path}#${key}`);
+    vaultCache.delete(`${resolvedPath}#${key}`);
   }
 }
 

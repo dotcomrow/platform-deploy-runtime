@@ -56,10 +56,9 @@ values to this repo.
 `platform-deploy-service` accepts either its service-internal token from
 `secret/data/platform-deploy-service#token` or the configured Directus platform
 management service token. In Kubernetes, that Directus token is resolved from
-`secret/data/directus/gravitee/openapi/admin#token`. The bootstrap job also
-mirrors only the service-internal auth token to
-`secret/data/platform-deploy-service/auth#token` so the Hasura action bridge can
-call the deploy API without reading the deploy executor credential bundle.
+`secret/data/directus/gravitee/clients/<graphql-api-client-id>#token`, matching
+the token forwarded by Gravitee after it exchanges the user bearer token through
+`directus-auth-bridge`.
 
 `POST /internal/secrets/platform-deploy` writes only the operator-managed
 Terraform Cloud, Cloudflare, and source clone credentials to Vault paths
