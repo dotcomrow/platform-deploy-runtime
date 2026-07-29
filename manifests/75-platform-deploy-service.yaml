@@ -1101,6 +1101,8 @@ spec:
               value: "secret/data/platform-deploy-service"
             - name: INTERNAL_TOKEN_VAULT_KEY
               value: "token"
+            - name: RETURN_PLATFORM_DEPLOY_SECRET_VALUES
+              value: "true"
             - name: VAULT_ADDR
               value: "http://vault.vault.svc.cluster.local:8200"
             - name: VAULT_TOKEN_FILE

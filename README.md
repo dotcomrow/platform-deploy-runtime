@@ -69,3 +69,8 @@ main path so the full dialog field set is visible together. The auth gateway adm
 resolved from the existing internal `secret/data/auth-gateway-admin-api#value`
 secret, not from this UI/API. The service merges submitted keys with existing
 KV data so internal tokens remain intact.
+
+Set `RETURN_PLATFORM_DEPLOY_SECRET_VALUES=false` on `platform-deploy-service` to
+keep `GET /internal/secrets/platform-deploy` from returning raw secret values.
+When disabled, the endpoint still reports which secret fields are configured and
+returns empty strings for the value fields.

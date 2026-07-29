@@ -21,6 +21,7 @@ const envSchema = z.object({
   INTERNAL_TOKEN: z.string().default(""),
   INTERNAL_TOKEN_VAULT_PATH: z.string().default("secret/data/platform-deploy-service"),
   INTERNAL_TOKEN_VAULT_KEY: z.string().default("token"),
+  RETURN_PLATFORM_DEPLOY_SECRET_VALUES: z.string().default("true"),
   VAULT_ADDR: z.string().default("http://vault.vault.svc.cluster.local:8200"),
   VAULT_TOKEN_FILE: z.string().default("/vault-secrets/vault-token"),
   TOKEN_CACHE_SECONDS: z.string().default("300"),
@@ -125,6 +126,16 @@ type PlatformDeploySecretsInput = {
   cloudflare_zone_id: string;
   github_token: string;
 };
+
+const emptyPlatformDeploySecrets = (): PlatformDeploySecretsInput => ({
+  tfe_token: "",
+  tfe_agent_pool_id: "",
+  tfe_organization: "",
+  cloudflare_token: "",
+  cloudflare_account_id: "",
+  cloudflare_zone_id: "",
+  github_token: ""
+});
 
 type VaultCacheEntry = {
   expiresAt: number;
@@ -382,6 +393,12 @@ function platformDeploySecretsOutput(
       asString(githubData.github_token, asString(serviceData.github_token, asString(serviceData["github-token"]))),
     )
   };
+}
+
+function configuredPlatformDeploySecretKeys(values: PlatformDeploySecretsInput): string[] {
+  return Object.entries(values)
+    .filter(([, value]) => value.trim().length > 0)
+    .map(([key]) => key);
 }
 
 async function directusToken(): Promise<string> {
@@ -1090,6 +1107,9 @@ const openApiSpec = {
         type: "object",
         required: [
           "ok",
+          "values_returned",
+          "values_redacted",
+          "configured_keys",
           "tfe_token",
           "tfe_agent_pool_id",
           "tfe_organization",
@@ -1101,6 +1121,12 @@ const openApiSpec = {
         additionalProperties: false,
         properties: {
           ok: { type: "boolean" },
+          values_returned: { type: "boolean" },
+          values_redacted: { type: "boolean" },
+          configured_keys: {
+            type: "array",
+            items: { type: "string" }
+          },
           tfe_token: { type: "string" },
           tfe_agent_pool_id: { type: "string" },
           tfe_organization: { type: "string" },
@@ -1345,9 +1371,14 @@ app.get("/internal/secrets/platform-deploy", async (req, res, next) => {
       vaultKv2Data("secret/data/platform-deploy-service"),
       vaultKv2Data("secret/data/platform-deploy-service/github")
     ]);
+    const values = platformDeploySecretsOutput(serviceData, githubData);
+    const valuesReturned = asBoolean(env.RETURN_PLATFORM_DEPLOY_SECRET_VALUES, true);
     res.status(200).json({
       ok: true,
-      ...platformDeploySecretsOutput(serviceData, githubData)
+      values_returned: valuesReturned,
+      values_redacted: !valuesReturned,
+      configured_keys: configuredPlatformDeploySecretKeys(values),
+      ...(valuesReturned ? values : emptyPlatformDeploySecrets())
     });
   } catch (error) {
     next(error);

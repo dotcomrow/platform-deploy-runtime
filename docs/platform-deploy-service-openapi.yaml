@@ -180,6 +180,9 @@ components:
       type: object
       required:
         - ok
+        - values_returned
+        - values_redacted
+        - configured_keys
         - tfe_token
         - tfe_agent_pool_id
         - tfe_organization
@@ -191,6 +194,14 @@ components:
       properties:
         ok:
           type: boolean
+        values_returned:
+          type: boolean
+        values_redacted:
+          type: boolean
+        configured_keys:
+          type: array
+          items:
+            type: string
         tfe_token:
           type: string
         tfe_agent_pool_id:
