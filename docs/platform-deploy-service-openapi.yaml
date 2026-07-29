@@ -61,6 +61,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/QueueOperationResponse"
   /internal/secrets/platform-deploy:
+    get:
+      operationId: getPlatformDeploySecrets
+      responses:
+        "200":
+          description: Platform deploy secrets loaded from Vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetPlatformDeploySecretsResponse"
     post:
       operationId: savePlatformDeploySecrets
       requestBody:
@@ -167,6 +176,35 @@ components:
         github_token:
           type: string
           minLength: 1
+    GetPlatformDeploySecretsResponse:
+      type: object
+      required:
+        - ok
+        - tfe_token
+        - tfe_agent_pool_id
+        - tfe_organization
+        - cloudflare_token
+        - cloudflare_account_id
+        - cloudflare_zone_id
+        - github_token
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        tfe_token:
+          type: string
+        tfe_agent_pool_id:
+          type: string
+        tfe_organization:
+          type: string
+        cloudflare_token:
+          type: string
+        cloudflare_account_id:
+          type: string
+        cloudflare_zone_id:
+          type: string
+        github_token:
+          type: string
     SavePlatformDeploySecretsResponse:
       type: object
       required:

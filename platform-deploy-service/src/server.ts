@@ -363,6 +363,27 @@ function platformDeploySecretsInput(body: JsonRecord): PlatformDeploySecretsInpu
   return input;
 }
 
+function platformDeploySecretsOutput(
+  serviceData: JsonRecord,
+  githubData: JsonRecord,
+): PlatformDeploySecretsInput {
+  return {
+    tfe_token: asString(serviceData.tfe_token, asString(serviceData["tfe-token"], asString(serviceData.tf_api_token))),
+    tfe_agent_pool_id: asString(serviceData.tfe_agent_pool_id, asString(serviceData["tfe-agent-pool-id"])),
+    tfe_organization: asString(
+      serviceData.tfe_organization,
+      asString(serviceData["tfe-organization"], asString(serviceData.tf_cloud_organization)),
+    ),
+    cloudflare_token: asString(serviceData.cloudflare_token, asString(serviceData["cloudflare-token"])),
+    cloudflare_account_id: asString(serviceData.cloudflare_account_id, asString(serviceData["cloudflare-account-id"])),
+    cloudflare_zone_id: asString(serviceData.cloudflare_zone_id, asString(serviceData["cloudflare-zone-id"])),
+    github_token: asString(
+      githubData.token,
+      asString(githubData.github_token, asString(serviceData.github_token, asString(serviceData["github-token"]))),
+    )
+  };
+}
+
 async function directusToken(): Promise<string> {
   if (env.DIRECTUS_STATIC_TOKEN) {
     return env.DIRECTUS_STATIC_TOKEN;
@@ -1065,6 +1086,30 @@ const openApiSpec = {
           github_token: { type: "string", minLength: 1 }
         }
       },
+      GetPlatformDeploySecretsResponse: {
+        type: "object",
+        required: [
+          "ok",
+          "tfe_token",
+          "tfe_agent_pool_id",
+          "tfe_organization",
+          "cloudflare_token",
+          "cloudflare_account_id",
+          "cloudflare_zone_id",
+          "github_token"
+        ],
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          tfe_token: { type: "string" },
+          tfe_agent_pool_id: { type: "string" },
+          tfe_organization: { type: "string" },
+          cloudflare_token: { type: "string" },
+          cloudflare_account_id: { type: "string" },
+          cloudflare_zone_id: { type: "string" },
+          github_token: { type: "string" }
+        }
+      },
       SavePlatformDeploySecretsResponse: {
         type: "object",
         required: ["ok", "vault_paths", "saved_keys"],
@@ -1155,6 +1200,19 @@ const openApiSpec = {
       }
     },
     "/internal/secrets/platform-deploy": {
+      get: {
+        operationId: "getPlatformDeploySecrets",
+        responses: {
+          "200": {
+            description: "Platform deploy secrets loaded from Vault",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/GetPlatformDeploySecretsResponse" }
+              }
+            }
+          }
+        }
+      },
       post: {
         operationId: "savePlatformDeploySecrets",
         requestBody: {
@@ -1268,6 +1326,22 @@ app.post("/internal/apps/:id/destroy", async (req, res, next) => {
     const body = asRecord(req.body) ?? {};
     const result = await queueOperation(req.params.id, operationTypeFromBody(body, "destroy"));
     res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/internal/secrets/platform-deploy", async (req, res, next) => {
+  try {
+    await enforceInternalAuth(req);
+    const [serviceData, githubData] = await Promise.all([
+      vaultKv2Data("secret/data/platform-deploy-service"),
+      vaultKv2Data("secret/data/platform-deploy-service/github")
+    ]);
+    res.status(200).json({
+      ok: true,
+      ...platformDeploySecretsOutput(serviceData, githubData)
+    });
   } catch (error) {
     next(error);
   }
