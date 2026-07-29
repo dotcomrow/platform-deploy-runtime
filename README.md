@@ -60,10 +60,12 @@ management service token. In Kubernetes, that Directus token is resolved from
 the token forwarded by Gravitee after it exchanges the user bearer token through
 `directus-auth-bridge`.
 
-`POST /internal/secrets/platform-deploy` writes only the operator-managed
-Terraform Cloud, Cloudflare, and source clone credentials to Vault paths
-`secret/data/platform-deploy-service` and
-`secret/data/platform-deploy-service/github`. The auth gateway admin token is
+`GET /internal/secrets/platform-deploy` loads the operator-managed Terraform
+Cloud, Cloudflare, and source clone credentials for the Organization Management
+dialog. `POST /internal/secrets/platform-deploy` writes those same fields to
+Vault paths `secret/data/platform-deploy-service` and
+`secret/data/platform-deploy-service/github`; `github_token` is also kept on the
+main path so the full dialog field set is visible together. The auth gateway admin token is
 resolved from the existing internal `secret/data/auth-gateway-admin-api#value`
 secret, not from this UI/API. The service merges submitted keys with existing
 KV data so internal tokens remain intact.

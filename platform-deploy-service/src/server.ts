@@ -1358,7 +1358,8 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
       tfe_organization: input.tfe_organization,
       cloudflare_token: input.cloudflare_token,
       cloudflare_account_id: input.cloudflare_account_id,
-      cloudflare_zone_id: input.cloudflare_zone_id
+      cloudflare_zone_id: input.cloudflare_zone_id,
+      github_token: input.github_token
     }, ["app_auth_gateway_admin_token", "app-auth-gateway-admin-token"]);
     await writeVaultKv2Data("secret/data/platform-deploy-service/github", {
       token: input.github_token,
