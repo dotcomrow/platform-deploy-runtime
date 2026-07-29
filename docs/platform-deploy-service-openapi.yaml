@@ -211,6 +211,7 @@ components:
         - ok
         - vault_paths
         - saved_keys
+        - saved_keys_by_path
       additionalProperties: false
       properties:
         ok:
@@ -223,6 +224,12 @@ components:
           type: array
           items:
             type: string
+        saved_keys_by_path:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
     ErrorResponse:
       type: object
       properties:

@@ -1112,7 +1112,7 @@ const openApiSpec = {
       },
       SavePlatformDeploySecretsResponse: {
         type: "object",
-        required: ["ok", "vault_paths", "saved_keys"],
+        required: ["ok", "vault_paths", "saved_keys", "saved_keys_by_path"],
         properties: {
           ok: { type: "boolean" },
           vault_paths: {
@@ -1122,6 +1122,13 @@ const openApiSpec = {
           saved_keys: {
             type: "array",
             items: { type: "string" }
+          },
+          saved_keys_by_path: {
+            type: "object",
+            additionalProperties: {
+              type: "array",
+              items: { type: "string" }
+            }
           }
         },
         additionalProperties: false
@@ -1379,7 +1386,22 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
         "cloudflare_account_id",
         "cloudflare_zone_id",
         "github_token"
-      ]
+      ],
+      saved_keys_by_path: {
+        "secret/data/platform-deploy-service": [
+          "tfe_token",
+          "tfe_agent_pool_id",
+          "tfe_organization",
+          "cloudflare_token",
+          "cloudflare_account_id",
+          "cloudflare_zone_id",
+          "github_token"
+        ],
+        "secret/data/platform-deploy-service/github": [
+          "token",
+          "github_token"
+        ]
+      }
     });
   } catch (error) {
     next(error);
