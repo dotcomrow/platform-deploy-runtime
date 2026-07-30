@@ -531,6 +531,19 @@ async function getOperation(operationId: string): Promise<PlatformOperation> {
   return response.data;
 }
 
+async function getActiveOperationForApp(appId: string): Promise<PlatformOperation | null> {
+  const params = new URLSearchParams();
+  params.set("fields", "id,operation_type,status");
+  params.set("filter[app_id][_eq]", appId);
+  params.set("filter[status][_in]", "queued,running");
+  params.set("sort", "-date_created");
+  params.set("limit", "1");
+  const response = await directusJson<DirectusListResponse<PlatformOperation>>(
+    `/items/platform_app_operations?${params.toString()}`
+  );
+  return response.data?.[0] ?? null;
+}
+
 async function updateOperation(operationId: string, patch: JsonRecord): Promise<void> {
   await directusJson<DirectusItemResponse<PlatformOperation>>(`/items/platform_app_operations/${encodeURIComponent(operationId)}`, {
     method: "PATCH",
@@ -958,6 +971,14 @@ function operationTypeFromBody(body: JsonRecord, fallback: OperationType): Opera
 
 async function queueOperation(appId: string, operationType: OperationType): Promise<JsonRecord> {
   const app = await getApp(appId);
+  const activeOperation = await getActiveOperationForApp(app.id);
+  if (activeOperation) {
+    throw Object.assign(
+      new Error(`Platform app ${app.app_key} already has a ${activeOperation.status} ${activeOperation.operation_type} operation.`),
+      { status: 409 }
+    );
+  }
+
   const appSourceRepo = sourceRepository(app);
   if (!appSourceRepo) {
     throw Object.assign(new Error("App source repository is not configured."), { status: 422 });
