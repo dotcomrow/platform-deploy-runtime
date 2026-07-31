@@ -67,6 +67,7 @@ const TERRAFORM_RUN_POLL_SECONDS = Math.max(5, Number(env.TERRAFORM_RUN_POLL_SEC
 type JsonRecord = Record<string, unknown>;
 type OperationType = "create" | "update" | "redeploy" | "delete" | "destroy";
 type OperationStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+type OperationStepStatus = OperationStatus;
 type DeploymentStatus = "not_deployed" | "queued" | "deploying" | "deployed" | "failed" | "destroying" | "destroyed";
 type DeploymentStrategy = "terraform_cloud" | "local_terraform";
 
@@ -115,6 +116,25 @@ type PlatformOperation = {
   operation_type: OperationType;
   status: OperationStatus;
   result_json?: JsonRecord | null;
+};
+
+type PlatformOperationStep = {
+  id: string;
+  operation_id: string | PlatformOperation;
+  app_id?: string | PlatformApp | null;
+  step_key: string;
+  step_label?: string | null;
+  status: OperationStepStatus;
+  sequence?: number | null;
+  message?: string | null;
+  result_json?: JsonRecord | null;
+  error_message?: string | null;
+  log_excerpt?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  date_created?: string | null;
+  date_updated?: string | null;
 };
 
 type PlatformDeploySecretsInput = {
@@ -171,6 +191,36 @@ function asBoolean(value: unknown, fallback = false): boolean {
 
 function truncate(value: string, max = 1200): string {
   return value.length <= max ? value : `${value.slice(0, max)}...`;
+}
+
+function redactText(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/([?&](?:token|access_token|refresh_token|key|secret)=)[^&\s]+/gi, "$1[redacted]");
+}
+
+function redactJsonValue(value: unknown, key = ""): unknown {
+  if (/token|secret|password|credential|private[_-]?key/i.test(key)) {
+    return "[redacted]";
+  }
+  if (typeof value === "string") {
+    return redactText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactJsonValue(entry));
+  }
+  const record = asRecord(value);
+  if (record) {
+    return Object.fromEntries(Object.entries(record).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactJsonValue(entryValue, entryKey)
+    ]));
+  }
+  return value;
+}
+
+function redactJsonRecord(value: JsonRecord): JsonRecord {
+  return redactJsonValue(value) as JsonRecord;
 }
 
 function sha256(value: string): string {
@@ -555,6 +605,135 @@ async function updateApp(appId: string, patch: JsonRecord): Promise<void> {
   await directusJson<DirectusItemResponse<PlatformApp>>(`/items/platform_apps/${encodeURIComponent(appId)}`, {
     method: "PATCH",
     body: patch
+  });
+}
+
+function operationStepStatus(value: unknown, fallback: OperationStepStatus): OperationStepStatus {
+  const normalized = asString(value).toLowerCase();
+  if (normalized === "queued" || normalized === "running" || normalized === "succeeded" || normalized === "failed" || normalized === "canceled") {
+    return normalized;
+  }
+  return fallback;
+}
+
+function stepSequence(stepKey: string): number {
+  const order: Record<string, number> = {
+    queued: 5,
+    prepare: 10,
+    "prepare-submit": 12,
+    orchestration: 20,
+    "prod-deploy": 30,
+    "preview-deploy": 40,
+    "preview-destroy": 50,
+    "prod-destroy": 60,
+    finish: 90
+  };
+  return order[stepKey] ?? 500;
+}
+
+function stepLabel(stepKey: string): string {
+  return stepKey
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function optionalInt(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : undefined;
+}
+
+async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
+  const params = new URLSearchParams();
+  params.set("fields", "id,operation_id,app_id,step_key,status,result_json");
+  params.set("filter[operation_id][_eq]", operationId);
+  params.set("filter[step_key][_eq]", stepKey);
+  params.set("limit", "1");
+  const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
+    `/items/platform_app_operation_steps?${params.toString()}`
+  );
+  return response.data?.[0] ?? null;
+}
+
+async function listOperationSteps(operationId: string): Promise<PlatformOperationStep[]> {
+  const params = new URLSearchParams();
+  params.set("fields", [
+    "id",
+    "operation_id",
+    "app_id",
+    "step_key",
+    "step_label",
+    "status",
+    "sequence",
+    "message",
+    "result_json",
+    "error_message",
+    "log_excerpt",
+    "started_at",
+    "finished_at",
+    "duration_ms",
+    "date_created",
+    "date_updated"
+  ].join(","));
+  params.set("filter[operation_id][_eq]", operationId);
+  params.set("sort", "sequence,date_created");
+  params.set("limit", "100");
+  const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
+    `/items/platform_app_operation_steps?${params.toString()}`
+  );
+  return response.data ?? [];
+}
+
+async function upsertOperationStep(
+  operation: PlatformOperation,
+  stepKey: string,
+  values: JsonRecord = {}
+): Promise<void> {
+  const now = new Date().toISOString();
+  const status = operationStepStatus(values.status, "running");
+  const appId = asString(values.app_id) || appIdFromOperation(operation);
+  const existing = await getOperationStep(operation.id, stepKey);
+  const incomingResult = redactJsonRecord(asRecord(values.result_json) ?? asRecord(values.result) ?? {});
+  const existingResult = redactJsonRecord(asRecord(existing?.result_json) ?? {});
+  const durationMs = optionalInt(values.duration_ms);
+  const patch: JsonRecord = {
+    operation_id: operation.id,
+    app_id: appId || undefined,
+    step_key: stepKey,
+    step_label: asString(values.step_label) || asString(values.label) || stepLabel(stepKey),
+    status,
+    sequence: optionalInt(values.sequence) ?? stepSequence(stepKey),
+    message: truncate(redactText(asString(values.message)), 2000) || null,
+    result_json: {
+      ...existingResult,
+      ...incomingResult
+    },
+    error_message: truncate(redactText(asString(values.error_message)), 4000) || null,
+    log_excerpt: truncate(redactText(asString(values.log_excerpt)), 12000) || null,
+    started_at: asString(values.started_at) || (status === "running" && !existing ? now : undefined),
+    finished_at: asString(values.finished_at) || (status === "succeeded" || status === "failed" || status === "canceled" ? now : undefined),
+    date_updated: now
+  };
+  if (durationMs !== undefined) {
+    patch.duration_ms = durationMs;
+  }
+
+  if (existing?.id) {
+    await directusJson<DirectusItemResponse<PlatformOperationStep>>(`/items/platform_app_operation_steps/${encodeURIComponent(existing.id)}`, {
+      method: "PATCH",
+      body: patch
+    });
+    return;
+  }
+
+  await directusJson<DirectusItemResponse<PlatformOperationStep>>("/items/platform_app_operation_steps", {
+    method: "POST",
+    body: {
+      id: randomUUID(),
+      date_created: now,
+      ...patch
+    }
   });
 }
 
@@ -997,6 +1176,16 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
   const operation = await createOperation(app, operationType, operationInput, executionProvider);
   const input = buildRunnerInput(app, operationType, operation.id);
   await updateOperation(operation.id, { input_json: input });
+  await upsertOperationStep(operation, "queued", {
+    status: "queued",
+    app_id: app.id,
+    message: `Queued ${operationType} for ${app.keycloak_realm}/${app.app_key}.`,
+    result_json: {
+      operation_type: operationType,
+      sequence: operationSequence(operationType),
+      deployment_strategy: executionProvider
+    }
+  });
 
   const queuedStatus: DeploymentStatus = operationSequence(operationType) === "destroy" ? "destroying" : "queued";
   await updateApp(app.id, {
@@ -1014,6 +1203,14 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
         prepared_topic: env.PLATFORM_DEPLOY_PREPARED_TOPIC
       }
     });
+    await upsertOperationStep(operation, "prepare-submit", {
+      status: "running",
+      app_id: app.id,
+      message: "Submitting deployment prepare job to Flink.",
+      result_json: {
+        prepared_topic: env.PLATFORM_DEPLOY_PREPARED_TOPIC
+      }
+    });
     const flinkJob = await submitFlinkPrepareJob(app, operation, input, operationToken);
     const currentOperation = await getOperation(operation.id);
     await updateOperation(operation.id, {
@@ -1025,6 +1222,16 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
         flink_jar_id: flinkJob.jarId,
         flink_job_id: flinkJob.jobId,
         prepare_submitted_at: new Date().toISOString()
+      }
+    });
+    await upsertOperationStep(operation, "prepare-submit", {
+      status: "succeeded",
+      app_id: app.id,
+      message: "Flink prepare job was submitted.",
+      result_json: {
+        flink_jar_id: flinkJob.jarId,
+        flink_job_id: flinkJob.jobId,
+        prepared_topic: env.PLATFORM_DEPLOY_PREPARED_TOPIC
       }
     });
     return {
@@ -1040,6 +1247,13 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
       status: "failed",
       finished_at: new Date().toISOString(),
       error_message: message
+    });
+    await upsertOperationStep(operation, "prepare-submit", {
+      status: "failed",
+      app_id: app.id,
+      message: "Failed to submit deployment prepare job to Flink.",
+      error_message: message,
+      log_excerpt: error instanceof Error ? error.stack || error.message : String(error)
     });
     await updateApp(app.id, {
       deployment_status: "failed",
@@ -1065,6 +1279,20 @@ const openApiSpec = {
         required: true,
         schema: { type: "string", format: "uuid" },
         description: "Directus platform_apps id."
+      },
+      OperationIdPath: {
+        name: "id",
+        in: "path",
+        required: true,
+        schema: { type: "string", format: "uuid" },
+        description: "Directus platform_app_operations id."
+      },
+      StepKeyPath: {
+        name: "stepKey",
+        in: "path",
+        required: true,
+        schema: { type: "string", minLength: 1 },
+        description: "Stable deployment step key such as prod-deploy or preview-destroy."
       }
     },
     schemas: {
@@ -1101,6 +1329,72 @@ const openApiSpec = {
           prepared_topic: { type: "string" }
         },
         additionalProperties: true
+      },
+      OperationStepStatusRequest: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          app_id: { type: "string", format: "uuid" },
+          step_label: { type: "string" },
+          sequence: { type: "integer", minimum: 0 },
+          message: { type: "string" },
+          result_json: { type: "object", additionalProperties: true },
+          error_message: { type: "string" },
+          log_excerpt: { type: "string" },
+          started_at: { type: "string", format: "date-time" },
+          finished_at: { type: "string", format: "date-time" },
+          duration_ms: { type: "integer", minimum: 0 }
+        }
+      },
+      OperationStep: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          id: { type: "string", format: "uuid" },
+          operation_id: { type: "string", format: "uuid" },
+          app_id: { type: "string", format: "uuid", nullable: true },
+          step_key: { type: "string" },
+          step_label: { type: "string", nullable: true },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          sequence: { type: "integer" },
+          message: { type: "string", nullable: true },
+          result_json: { type: "object", additionalProperties: true },
+          error_message: { type: "string", nullable: true },
+          log_excerpt: { type: "string", nullable: true },
+          started_at: { type: "string", format: "date-time", nullable: true },
+          finished_at: { type: "string", format: "date-time", nullable: true },
+          duration_ms: { type: "integer", nullable: true },
+          date_created: { type: "string", format: "date-time" },
+          date_updated: { type: "string", format: "date-time", nullable: true }
+        }
+      },
+      OperationStepStatusResponse: {
+        type: "object",
+        required: ["ok"],
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" }
+        }
+      },
+      ListOperationStepsResponse: {
+        type: "object",
+        required: ["ok", "operation_id", "steps"],
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          operation_id: { type: "string", format: "uuid" },
+          steps: {
+            type: "array",
+            items: { $ref: "#/components/schemas/OperationStep" }
+          }
+        }
       },
       SavePlatformDeploySecretsRequest: {
         type: "object",
@@ -1247,6 +1541,57 @@ const openApiSpec = {
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/QueueOperationResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/operations/{id}/steps": {
+      get: {
+        operationId: "listOperationSteps",
+        parameters: [{ $ref: "#/components/parameters/OperationIdPath" }],
+        responses: {
+          "200": {
+            description: "Detailed status steps for a platform app operation",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ListOperationStepsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/operations/{id}/steps/{stepKey}": {
+      post: {
+        operationId: "recordOperationStep",
+        parameters: [
+          { $ref: "#/components/parameters/OperationIdPath" },
+          { $ref: "#/components/parameters/StepKeyPath" }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/OperationStepStatusRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Step status recorded",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/OperationStepStatusResponse" }
+              }
+            }
+          },
+          "422": {
+            description: "Step key or payload was invalid",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ErrorResponse" }
               }
             }
           }
@@ -1470,6 +1815,15 @@ app.post("/internal/operations/:id/start", async (req, res, next) => {
       status: "running",
       started_at: new Date().toISOString()
     });
+    await upsertOperationStep(operation, "orchestration", {
+      status: "running",
+      app_id: appId,
+      message: "NiFi deployment orchestration started.",
+      result_json: {
+        operation_type: operationType,
+        sequence: operationSequence(operationType)
+      }
+    });
     if (appId) {
       await updateApp(appId, {
         deployment_status: operationSequence(operationType) === "destroy" ? "destroying" : "deploying",
@@ -1497,7 +1851,42 @@ app.post("/internal/operations/:id/prepared", async (req, res, next) => {
         prepared_topic: preparedTopic
       }
     });
+    await upsertOperationStep(operation, "prepare", {
+      status: "succeeded",
+      app_id: asString(body.app_id) || appIdFromOperation(operation),
+      message: "Flink prepared the deployment payload and published it to NiFi.",
+      result_json: {
+        ...bodyResultJson,
+        prepared_at: preparedAt,
+        prepared_topic: preparedTopic
+      }
+    });
     res.status(200).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/internal/operations/:id/steps/:stepKey", async (req, res, next) => {
+  try {
+    const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    const body = asRecord(req.body) ?? {};
+    const stepKey = asString(req.params.stepKey);
+    if (!stepKey) {
+      throw Object.assign(new Error("stepKey is required."), { status: 422 });
+    }
+    await upsertOperationStep(operation, stepKey, body);
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/internal/operations/:id/steps", async (req, res, next) => {
+  try {
+    await enforceInternalOrOperationAuth(req, req.params.id);
+    const steps = await listOperationSteps(req.params.id);
+    res.status(200).json({ ok: true, operation_id: req.params.id, steps });
   } catch (error) {
     next(error);
   }
@@ -1526,6 +1915,22 @@ app.post("/internal/operations/:id/finish", async (req, res, next) => {
       log_excerpt: asString(body.log_excerpt) || null,
       terraform_run_id: asString(body.terraform_run_id) || undefined,
       terraform_run_url: asString(body.terraform_run_url) || undefined
+    });
+    await upsertOperationStep(operation, "finish", {
+      status: succeeded ? "succeeded" : "failed",
+      app_id: appId,
+      message: succeeded ? "Deployment orchestration finished successfully." : "Deployment orchestration failed.",
+      result_json: bodyResultJson,
+      error_message: errorMessage || null,
+      log_excerpt: asString(body.log_excerpt) || null
+    });
+    await upsertOperationStep(operation, "orchestration", {
+      status: succeeded ? "succeeded" : "failed",
+      app_id: appId,
+      message: succeeded ? "NiFi deployment orchestration completed." : "NiFi deployment orchestration failed before completion.",
+      result_json: bodyResultJson,
+      error_message: errorMessage || null,
+      log_excerpt: asString(body.log_excerpt) || null
     });
     if (appId) {
       await updateApp(appId, {

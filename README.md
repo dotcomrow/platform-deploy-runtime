@@ -40,6 +40,14 @@ access under the package's Actions access settings.
 5. `dataflow-platform-deploy-app` consumes the prepared Kafka request and runs
    the NiFi orchestration flow.
 
+Detailed non-secret operation progress is stored in
+`platform_app_operation_steps`. Pipeline components can call
+`POST /internal/operations/{operation_id}/steps/{step_key}` to upsert current
+step status, message, timing, and sanitized result metadata. The Organization
+Management UI can read the same rows through the Directus/Hasura
+`platform_app_operation_steps` collection or via
+`GET /internal/operations/{operation_id}/steps`.
+
 ## Validation
 
 ```sh

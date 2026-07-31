@@ -60,6 +60,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/QueueOperationResponse"
+  /internal/operations/{id}/steps:
+    get:
+      operationId: listOperationSteps
+      parameters:
+        - $ref: "#/components/parameters/OperationIdPath"
+      responses:
+        "200":
+          description: Detailed status steps for a platform app operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListOperationStepsResponse"
+  /internal/operations/{id}/steps/{stepKey}:
+    post:
+      operationId: recordOperationStep
+      parameters:
+        - $ref: "#/components/parameters/OperationIdPath"
+        - $ref: "#/components/parameters/StepKeyPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationStepStatusRequest"
+      responses:
+        "200":
+          description: Step status recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationStepStatusResponse"
+        "422":
+          description: Step key or payload was invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /internal/secrets/platform-deploy:
     get:
       operationId: getPlatformDeploySecrets
@@ -101,6 +138,22 @@ components:
       schema:
         type: string
         format: uuid
+    OperationIdPath:
+      name: id
+      in: path
+      required: true
+      description: Directus platform_app_operations id.
+      schema:
+        type: string
+        format: uuid
+    StepKeyPath:
+      name: stepKey
+      in: path
+      required: true
+      description: Stable deployment step key such as prod-deploy or preview-destroy.
+      schema:
+        type: string
+        minLength: 1
   schemas:
     QueueDeployRequest:
       type: object
@@ -143,6 +196,128 @@ components:
           type: string
         prepared_topic:
           type: string
+    OperationStepStatusRequest:
+      type: object
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        app_id:
+          type: string
+          format: uuid
+        step_label:
+          type: string
+        sequence:
+          type: integer
+          minimum: 0
+        message:
+          type: string
+        result_json:
+          type: object
+          additionalProperties: true
+        error_message:
+          type: string
+        log_excerpt:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          minimum: 0
+    OperationStep:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          format: uuid
+        operation_id:
+          type: string
+          format: uuid
+        app_id:
+          type: string
+          format: uuid
+          nullable: true
+        step_key:
+          type: string
+        step_label:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        sequence:
+          type: integer
+        message:
+          type: string
+          nullable: true
+        result_json:
+          type: object
+          additionalProperties: true
+        error_message:
+          type: string
+          nullable: true
+        log_excerpt:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_ms:
+          type: integer
+          nullable: true
+        date_created:
+          type: string
+          format: date-time
+        date_updated:
+          type: string
+          format: date-time
+          nullable: true
+    OperationStepStatusResponse:
+      type: object
+      required:
+        - ok
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+    ListOperationStepsResponse:
+      type: object
+      required:
+        - ok
+        - operation_id
+        - steps
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        operation_id:
+          type: string
+          format: uuid
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationStep"
     SavePlatformDeploySecretsRequest:
       type: object
       required:

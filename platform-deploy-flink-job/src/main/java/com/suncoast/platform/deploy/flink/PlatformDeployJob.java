@@ -66,6 +66,7 @@ public final class PlatformDeployJob {
       try {
         payload = decodePayload(mapper, config.operationPayloadBase64);
         validate(payload);
+        callbackStep(mapper, payload, "prepare", "running", "Flink is validating the deployment payload and preparing the NiFi request.", null, null, null);
         String preparedAt = Instant.now().toString();
         payload.put("prepared_at", preparedAt);
         payload.put("prepared_by", "platform-deploy-flink-job");
@@ -74,9 +75,16 @@ public final class PlatformDeployJob {
 
         String rendered = mapper.writeValueAsString(payload);
         publishPreparedRequest(rendered);
+        ObjectNode stepResult = mapper.createObjectNode();
+        stepResult.put("prepared_by", "platform-deploy-flink-job");
+        stepResult.put("prepared_topic", config.preparedTopic);
+        stepResult.put("prepared_at", preparedAt);
+        stepResult.put("source", config.source);
+        callbackStep(mapper, payload, "prepare", "succeeded", "Flink prepared the deployment payload and published it to NiFi.", stepResult, null, null);
         callbackPrepared(mapper, payload, preparedAt);
         return mapper.writeValueAsString(summary(mapper, payload, preparedAt));
       } catch (Exception exc) {
+        callbackStep(mapper, payload, "prepare", "failed", "Flink failed to prepare the deployment payload.", null, truncate(exc.getMessage(), 900), truncate(exc.toString(), 2000));
         callbackFailure(mapper, payload, exc);
         throw exc;
       }
@@ -217,6 +225,38 @@ public final class PlatformDeployJob {
         postServiceJson(mapper, "/internal/operations/" + config.operationId + "/finish", body);
       } catch (Exception callbackError) {
         System.err.println("Failed to send platform deploy failure callback: " + callbackError.getMessage());
+      }
+    }
+
+    private void callbackStep(
+      ObjectMapper mapper,
+      ObjectNode payload,
+      String stepKey,
+      String status,
+      String message,
+      ObjectNode result,
+      String errorMessage,
+      String logExcerpt
+    ) {
+      try {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("app_id", payload == null ? config.appId : text(payload, "app_id"));
+        body.put("status", status);
+        body.put("step_label", "Prepare");
+        body.put("sequence", 10);
+        body.put("message", message);
+        if (result != null) {
+          body.set("result_json", result);
+        }
+        if (errorMessage != null && !errorMessage.isBlank()) {
+          body.put("error_message", errorMessage);
+        }
+        if (logExcerpt != null && !logExcerpt.isBlank()) {
+          body.put("log_excerpt", logExcerpt);
+        }
+        postServiceJson(mapper, "/internal/operations/" + config.operationId + "/steps/" + stepKey, body);
+      } catch (Exception callbackError) {
+        System.err.println("Failed to send platform deploy step callback: " + callbackError.getMessage());
       }
     }
 
