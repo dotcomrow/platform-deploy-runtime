@@ -487,14 +487,18 @@ async function acceptedServiceAuthTokens(): Promise<string[]> {
 
 async function directusJson<T>(path: string, init: { method?: Dispatcher.HttpMethod; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
   const token = await directusToken();
+  const method = init.method ?? "GET";
   const result = await httpJson<unknown>(`${DIRECTUS_BASE_URL}${path}`, {
-    method: init.method ?? "GET",
+    method,
     body: init.body,
     timeoutMs: init.timeoutMs ?? REQUEST_TIMEOUT_MS,
-    headers: { authorization: `Bearer ${token}` }
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(method === "GET" ? { "cache-control": "no-store" } : {})
+    }
   });
   if (result.statusCode >= 400) {
-    throw new Error(`Directus ${init.method ?? "GET"} ${path} failed: ${result.statusCode} ${truncate(extractErrorMessage(result.payload, result.text), 700)}`);
+    throw new Error(`Directus ${method} ${path} failed: ${result.statusCode} ${truncate(extractErrorMessage(result.payload, result.text), 700)}`);
   }
   return result.payload as T;
 }
@@ -643,12 +647,24 @@ function optionalInt(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : undefined;
 }
 
+function isDirectusOperationStepUniqueError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("platform_app_operation_steps")
+    && message.includes("operation_id, step_key")
+    && message.includes("unique");
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
   const params = new URLSearchParams();
   params.set("fields", "id,operation_id,app_id,step_key,status,result_json");
   params.set("filter[operation_id][_eq]", operationId);
   params.set("sort", "sequence,date_created");
   params.set("limit", "100");
+  params.set("_cb", randomUUID());
   const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
     `/items/platform_app_operation_steps?${params.toString()}`
   );
@@ -694,46 +710,69 @@ async function upsertOperationStep(
   const appId = asString(values.app_id) || appIdFromOperation(operation);
   const existing = await getOperationStep(operation.id, stepKey);
   const incomingResult = redactJsonRecord(asRecord(values.result_json) ?? asRecord(values.result) ?? {});
-  const existingResult = redactJsonRecord(asRecord(existing?.result_json) ?? {});
   const durationMs = optionalInt(values.duration_ms);
-  const patch: JsonRecord = {
-    operation_id: operation.id,
-    app_id: appId || undefined,
-    step_key: stepKey,
-    step_label: asString(values.step_label) || asString(values.label) || stepLabel(stepKey),
-    status,
-    sequence: optionalInt(values.sequence) ?? stepSequence(stepKey),
-    message: truncate(redactText(asString(values.message)), 2000) || null,
-    result_json: {
-      ...existingResult,
-      ...incomingResult
-    },
-    error_message: truncate(redactText(asString(values.error_message)), 4000) || null,
-    log_excerpt: truncate(redactText(asString(values.log_excerpt)), 12000) || null,
-    started_at: asString(values.started_at) || (status === "running" && !existing ? now : undefined),
-    finished_at: asString(values.finished_at) || (status === "succeeded" || status === "failed" || status === "canceled" ? now : undefined),
-    date_updated: now
+  const buildPatch = (step: PlatformOperationStep | null): JsonRecord => {
+    const existingResult = redactJsonRecord(asRecord(step?.result_json) ?? {});
+    const patch: JsonRecord = {
+      operation_id: operation.id,
+      app_id: appId || undefined,
+      step_key: stepKey,
+      step_label: asString(values.step_label) || asString(values.label) || stepLabel(stepKey),
+      status,
+      sequence: optionalInt(values.sequence) ?? stepSequence(stepKey),
+      message: truncate(redactText(asString(values.message)), 2000) || null,
+      result_json: {
+        ...existingResult,
+        ...incomingResult
+      },
+      error_message: truncate(redactText(asString(values.error_message)), 4000) || null,
+      log_excerpt: truncate(redactText(asString(values.log_excerpt)), 12000) || null,
+      started_at: asString(values.started_at) || (status === "running" && !step ? now : undefined),
+      finished_at: asString(values.finished_at) || (status === "succeeded" || status === "failed" || status === "canceled" ? now : undefined),
+      date_updated: now
+    };
+    if (durationMs !== undefined) {
+      patch.duration_ms = durationMs;
+    }
+    return patch;
   };
-  if (durationMs !== undefined) {
-    patch.duration_ms = durationMs;
-  }
+
+  const updateExistingStep = async (step: PlatformOperationStep): Promise<void> => {
+    await directusJson<DirectusItemResponse<PlatformOperationStep>>(`/items/platform_app_operation_steps/${encodeURIComponent(step.id)}`, {
+      method: "PATCH",
+      body: buildPatch(step)
+    });
+  };
 
   if (existing?.id) {
-    await directusJson<DirectusItemResponse<PlatformOperationStep>>(`/items/platform_app_operation_steps/${encodeURIComponent(existing.id)}`, {
-      method: "PATCH",
-      body: patch
-    });
+    await updateExistingStep(existing);
     return;
   }
 
-  await directusJson<DirectusItemResponse<PlatformOperationStep>>("/items/platform_app_operation_steps", {
-    method: "POST",
-    body: {
-      id: randomUUID(),
-      date_created: now,
-      ...patch
+  try {
+    await directusJson<DirectusItemResponse<PlatformOperationStep>>("/items/platform_app_operation_steps", {
+      method: "POST",
+      body: {
+        id: randomUUID(),
+        date_created: now,
+        ...buildPatch(null)
+      }
+    });
+  } catch (error) {
+    if (!isDirectusOperationStepUniqueError(error)) {
+      throw error;
     }
-  });
+
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      await sleepMs(100 * attempt);
+      const racedExisting = await getOperationStep(operation.id, stepKey);
+      if (racedExisting?.id) {
+        await updateExistingStep(racedExisting);
+        return;
+      }
+    }
+    throw error;
+  }
 }
 
 function organizationFromApp(app: PlatformApp): PlatformOrganization | null {
