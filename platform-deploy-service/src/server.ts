@@ -70,6 +70,7 @@ type OperationStatus = "queued" | "running" | "succeeded" | "failed" | "canceled
 type OperationStepStatus = OperationStatus;
 type DeploymentStatus = "not_deployed" | "queued" | "deploying" | "deployed" | "failed" | "destroying" | "destroyed";
 type DeploymentStrategy = "terraform_cloud" | "local_terraform";
+const ACTIVE_OPERATION_STATUSES = new Set<OperationStatus>(["queued", "running"]);
 
 type DirectusListResponse<T> = {
   data?: T[];
@@ -583,6 +584,39 @@ async function getOperation(operationId: string): Promise<PlatformOperation> {
     throw Object.assign(new Error(`Platform operation ${operationId} was not found`), { status: 404 });
   }
   return response.data;
+}
+
+function operationActive(operation: PlatformOperation): boolean {
+  return ACTIVE_OPERATION_STATUSES.has(operation.status);
+}
+
+function operationStatusPayload(operation: PlatformOperation): JsonRecord {
+  const appId = appIdFromOperation(operation);
+  return {
+    ok: true,
+    operation_id: operation.id,
+    app_id: appId || null,
+    operation_type: operation.operation_type,
+    status: operation.status,
+    active: operationActive(operation)
+  };
+}
+
+function terminalOperationIgnoredPayload(operation: PlatformOperation, callbackName: string): JsonRecord {
+  return {
+    ...operationStatusPayload(operation),
+    ignored: true,
+    reason: `Operation is ${operation.status}; ${callbackName} callback was not applied.`
+  };
+}
+
+function requireActiveOperation(operation: PlatformOperation, callbackName: string): void {
+  if (!operationActive(operation)) {
+    throw Object.assign(
+      new Error(`Operation ${operation.id} is ${operation.status}; ${callbackName} callback cannot be applied.`),
+      { status: 409 }
+    );
+  }
 }
 
 async function getActiveOperationForApp(appId: string): Promise<PlatformOperation | null> {
@@ -1489,7 +1523,39 @@ const openApiSpec = {
         required: ["ok"],
         additionalProperties: false,
         properties: {
-          ok: { type: "boolean" }
+          ok: { type: "boolean" },
+          ignored: { type: "boolean" },
+          reason: { type: "string" },
+          operation_id: { type: "string", format: "uuid" },
+          app_id: { type: "string", format: "uuid", nullable: true },
+          operation_type: {
+            type: "string",
+            enum: ["create", "update", "redeploy", "delete", "destroy"]
+          },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          active: { type: "boolean" }
+        }
+      },
+      OperationStatusResponse: {
+        type: "object",
+        required: ["ok", "operation_id", "operation_type", "status", "active"],
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          operation_id: { type: "string", format: "uuid" },
+          app_id: { type: "string", format: "uuid", nullable: true },
+          operation_type: {
+            type: "string",
+            enum: ["create", "update", "redeploy", "delete", "destroy"]
+          },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          active: { type: "boolean" }
         }
       },
       ListOperationStepsResponse: {
@@ -1666,6 +1732,22 @@ const openApiSpec = {
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/ListOperationStepsResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/operations/{id}/status": {
+      get: {
+        operationId: "getOperationStatus",
+        parameters: [{ $ref: "#/components/parameters/OperationIdPath" }],
+        responses: {
+          "200": {
+            description: "Current operation status",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/OperationStatusResponse" }
               }
             }
           }
@@ -1917,6 +1999,7 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
 app.post("/internal/operations/:id/start", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    requireActiveOperation(operation, "start");
     const body = asRecord(req.body) ?? {};
     const appId = asString(body.app_id) || appIdFromOperation(operation);
     const operationType = operationTypeFromBody(body, operation.operation_type);
@@ -1948,6 +2031,7 @@ app.post("/internal/operations/:id/start", async (req, res, next) => {
 app.post("/internal/operations/:id/prepared", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    requireActiveOperation(operation, "prepared");
     const body = asRecord(req.body) ?? {};
     const bodyResultJson = asRecord(body.result_json) ?? {};
     const preparedAt = asString(body.prepared_at, new Date().toISOString());
@@ -1979,6 +2063,10 @@ app.post("/internal/operations/:id/prepared", async (req, res, next) => {
 app.post("/internal/operations/:id/steps/:stepKey", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    if (!operationActive(operation)) {
+      res.status(200).json(terminalOperationIgnoredPayload(operation, "step"));
+      return;
+    }
     const body = asRecord(req.body) ?? {};
     const stepKey = asString(req.params.stepKey);
     if (!stepKey) {
@@ -2001,9 +2089,22 @@ app.get("/internal/operations/:id/steps", async (req, res, next) => {
   }
 });
 
+app.get("/internal/operations/:id/status", async (req, res, next) => {
+  try {
+    const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    res.status(200).json(operationStatusPayload(operation));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/internal/operations/:id/finish", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
+    if (!operationActive(operation)) {
+      res.status(200).json(terminalOperationIgnoredPayload(operation, "finish"));
+      return;
+    }
     const body = asRecord(req.body) ?? {};
     const appId = asString(body.app_id) || appIdFromOperation(operation);
     const operationType = operationTypeFromBody(body, operation.operation_type);
