@@ -1059,7 +1059,7 @@ spec:
   template:
     metadata:
       annotations:
-        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-lookup-fix"
+        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-upsert-retry"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
