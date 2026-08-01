@@ -650,12 +650,22 @@ function optionalInt(value: unknown): number | undefined {
 function isDirectusOperationStepUniqueError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("platform_app_operation_steps")
-    && message.includes("operation_id, step_key")
-    && message.includes("unique");
+    && (message.includes("unique") || message.includes("duplicate"));
 }
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function operationStepId(operationId: string, stepKey: string): string {
+  const digest = sha256(`${operationId}:${stepKey}`).slice(0, 32);
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    digest.slice(12, 16),
+    digest.slice(16, 20),
+    digest.slice(20, 32)
+  ].join("-");
 }
 
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
@@ -709,6 +719,7 @@ async function upsertOperationStep(
   const status = operationStepStatus(values.status, "running");
   const appId = asString(values.app_id) || appIdFromOperation(operation);
   const existing = await getOperationStep(operation.id, stepKey);
+  const deterministicStepId = operationStepId(operation.id, stepKey);
   const incomingResult = redactJsonRecord(asRecord(values.result_json) ?? asRecord(values.result) ?? {});
   const durationMs = optionalInt(values.duration_ms);
   const buildPatch = (step: PlatformOperationStep | null): JsonRecord => {
@@ -744,6 +755,58 @@ async function upsertOperationStep(
     });
   };
 
+  const updateDeterministicStep = async (): Promise<boolean> => {
+    try {
+      await directusJson<DirectusItemResponse<PlatformOperationStep>>(`/items/platform_app_operation_steps/${encodeURIComponent(deterministicStepId)}`, {
+        method: "PATCH",
+        body: buildPatch({
+          id: deterministicStepId,
+          operation_id: operation.id,
+          app_id: appId || null,
+          step_key: stepKey,
+          status,
+          result_json: {}
+        })
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const updateExistingStepByUniqueFilter = async (): Promise<boolean> => {
+    const patch = buildPatch({
+      id: deterministicStepId,
+      operation_id: operation.id,
+      app_id: appId || null,
+      step_key: stepKey,
+      status,
+      result_json: {}
+    });
+    delete patch.operation_id;
+    delete patch.step_key;
+
+    try {
+      const response = await directusJson<DirectusListResponse<PlatformOperationStep>>("/items/platform_app_operation_steps", {
+        method: "PATCH",
+        body: {
+          query: {
+            filter: {
+              _and: [
+                { operation_id: { _eq: operation.id } },
+                { step_key: { _eq: stepKey } }
+              ]
+            }
+          },
+          data: patch
+        }
+      });
+      return Boolean(response.data?.length);
+    } catch {
+      return false;
+    }
+  };
+
   if (existing?.id) {
     await updateExistingStep(existing);
     return;
@@ -753,7 +816,7 @@ async function upsertOperationStep(
     await directusJson<DirectusItemResponse<PlatformOperationStep>>("/items/platform_app_operation_steps", {
       method: "POST",
       body: {
-        id: randomUUID(),
+        id: deterministicStepId,
         date_created: now,
         ...buildPatch(null)
       }
@@ -761,6 +824,14 @@ async function upsertOperationStep(
   } catch (error) {
     if (!isDirectusOperationStepUniqueError(error)) {
       throw error;
+    }
+
+    if (await updateDeterministicStep()) {
+      return;
+    }
+
+    if (await updateExistingStepByUniqueFilter()) {
+      return;
     }
 
     for (let attempt = 1; attempt <= 6; attempt += 1) {

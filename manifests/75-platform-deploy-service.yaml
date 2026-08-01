@@ -1059,7 +1059,7 @@ spec:
   template:
     metadata:
       annotations:
-        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-upsert-retry"
+        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-deterministic-id"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
