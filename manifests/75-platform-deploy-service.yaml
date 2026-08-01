@@ -1059,7 +1059,7 @@ spec:
   template:
     metadata:
       annotations:
-        platform.suncoast.systems/restart-revision: "2026-07-28-get-platform-deploy-secrets"
+        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-filter-fix"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
