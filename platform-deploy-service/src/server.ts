@@ -584,14 +584,13 @@ async function getOperation(operationId: string): Promise<PlatformOperation> {
 async function getActiveOperationForApp(appId: string): Promise<PlatformOperation | null> {
   const params = new URLSearchParams();
   params.set("fields", "id,operation_type,status");
-  params.set("filter[_and][0][app_id][_eq]", appId);
-  params.set("filter[_and][1][status][_in]", "queued,running");
+  params.set("filter[app_id][_eq]", appId);
   params.set("sort", "-date_created");
-  params.set("limit", "1");
+  params.set("limit", "25");
   const response = await directusJson<DirectusListResponse<PlatformOperation>>(
     `/items/platform_app_operations?${params.toString()}`
   );
-  return response.data?.[0] ?? null;
+  return response.data?.find((operation) => operation.status === "queued" || operation.status === "running") ?? null;
 }
 
 async function updateOperation(operationId: string, patch: JsonRecord): Promise<void> {
@@ -647,13 +646,13 @@ function optionalInt(value: unknown): number | undefined {
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
   const params = new URLSearchParams();
   params.set("fields", "id,operation_id,app_id,step_key,status,result_json");
-  params.set("filter[_and][0][operation_id][_eq]", operationId);
-  params.set("filter[_and][1][step_key][_eq]", stepKey);
-  params.set("limit", "1");
+  params.set("filter[operation_id][_eq]", operationId);
+  params.set("sort", "sequence,date_created");
+  params.set("limit", "100");
   const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
     `/items/platform_app_operation_steps?${params.toString()}`
   );
-  return response.data?.[0] ?? null;
+  return response.data?.find((step) => step.step_key === stepKey) ?? null;
 }
 
 async function listOperationSteps(operationId: string): Promise<PlatformOperationStep[]> {
