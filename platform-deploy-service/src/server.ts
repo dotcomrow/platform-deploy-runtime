@@ -32,6 +32,8 @@ const envSchema = z.object({
   FLINK_PARALLELISM: z.string().default("1"),
   PLATFORM_DEPLOY_PREPARED_TOPIC: z.string().default("batch.platform.deploy.prepared.v1"),
   PLATFORM_DEPLOY_SERVICE_URL: z.string().default("http://platform-deploy-service.directus.svc.cluster.local:8080"),
+  PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED: z.string().default("true"),
+  PLATFORM_NOTIFICATION_SERVICE_URL: z.string().default("http://platform-notification-service.directus.svc.cluster.local:8080"),
   OPERATION_CALLBACK_TOKEN_TTL_SECONDS: z.string().default("21600"),
   GITHUB_API_BASE: z.string().default("https://api.github.com"),
   TFE_API_BASE: z.string().default("https://app.terraform.io/api/v2"),
@@ -57,6 +59,8 @@ const VAULT_ADDR = env.VAULT_ADDR.replace(/\/+$/, "");
 const TOKEN_CACHE_SECONDS = Math.max(5, Number(env.TOKEN_CACHE_SECONDS) || 300);
 const VAULT_PATH_REF_PATTERN = /<path:([^#>]+)#([^>]+)>/g;
 const FLINK_REST_URL = env.FLINK_REST_URL.replace(/\/+$/, "");
+const PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED = asBoolean(env.PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED, true);
+const PLATFORM_NOTIFICATION_SERVICE_URL = env.PLATFORM_NOTIFICATION_SERVICE_URL.replace(/\/+$/, "");
 const FLINK_PARALLELISM = Math.max(1, Number(env.FLINK_PARALLELISM) || 1);
 const OPERATION_CALLBACK_TOKEN_TTL_SECONDS = Math.max(300, Number(env.OPERATION_CALLBACK_TOKEN_TTL_SECONDS) || 21_600);
 const GITHUB_API_BASE = env.GITHUB_API_BASE.replace(/\/+$/, "");
@@ -118,6 +122,8 @@ type PlatformOperation = {
   status: OperationStatus;
   result_json?: JsonRecord | null;
 };
+
+type NotificationChannel = "browser_push" | "email" | "sms";
 
 type PlatformOperationStep = {
   id: string;
@@ -676,6 +682,176 @@ function stepLabel(stepKey: string): string {
     .join(" ");
 }
 
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((entry) => asString(entry)).filter(Boolean);
+  }
+  const direct = asString(value);
+  return direct ? direct.split(",").map((entry) => entry.trim()).filter(Boolean) : [];
+}
+
+function notificationChannels(value: unknown): NotificationChannel[] {
+  const channels = stringList(value)
+    .map((entry) => entry.toLowerCase())
+    .filter((entry): entry is NotificationChannel => entry === "browser_push" || entry === "email" || entry === "sms");
+  return [...new Set(channels)];
+}
+
+function notificationContextForStep(operation: PlatformOperation, resultJson: JsonRecord): JsonRecord {
+  return asRecord(resultJson.notification_context)
+    ?? asRecord((asRecord(operation.result_json) ?? {}).notification_context)
+    ?? {};
+}
+
+function notificationChannelsForContext(context: JsonRecord): NotificationChannel[] {
+  const browserPush = asRecord(context.browser_push) ?? {};
+  if (asBoolean(browserPush.available, false) && asString(browserPush.subscription_id)) {
+    return ["browser_push"];
+  }
+  const fallbackChannels = notificationChannels(context.fallback_channels);
+  return fallbackChannels.length ? fallbackChannels : ["email", "sms"];
+}
+
+function notificationRecipientsForContext(context: JsonRecord, channels: NotificationChannel[]): JsonRecord[] {
+  const browserPush = asRecord(context.browser_push) ?? {};
+  const user = asRecord(context.user) ?? {};
+  const recipients: JsonRecord[] = [];
+
+  if (channels.includes("browser_push")) {
+    const subscriptionId = asString(browserPush.subscription_id);
+    if (subscriptionId) {
+      recipients.push({
+        type: "browser_subscription",
+        id: subscriptionId,
+        channels: ["browser_push"],
+        data: {
+          browser_installation_id: asString(browserPush.browser_installation_id) || null,
+          notification_context_id: asString(context.context_id) || null,
+          notification_thread_id: asString(context.thread_id) || null
+        }
+      });
+    }
+    return recipients;
+  }
+
+  const email = asString(user.email);
+  const phone = asString(user.phone);
+  if (channels.includes("email") && email) {
+    recipients.push({
+      type: "email",
+      address: email,
+      display_name: asString(user.display_name) || undefined,
+      channels: ["email"]
+    });
+  }
+  if (channels.includes("sms") && phone) {
+    recipients.push({
+      type: "phone",
+      address: phone,
+      display_name: asString(user.display_name) || undefined,
+      channels: ["sms"]
+    });
+  }
+  if (!recipients.length && asString(user.user_id)) {
+    recipients.push({
+      type: "user",
+      id: asString(user.user_id),
+      display_name: asString(user.display_name) || undefined,
+      channels
+    });
+  }
+  return recipients;
+}
+
+function notificationSeverityForStep(status: OperationStepStatus): string {
+  if (status === "failed" || status === "canceled") {
+    return "error";
+  }
+  if (status === "succeeded") {
+    return "success";
+  }
+  return "info";
+}
+
+function notificationPriorityForStep(status: OperationStepStatus): string {
+  return status === "failed" || status === "canceled" ? "high" : "normal";
+}
+
+async function emitPlatformOperationStepNotification(
+  operation: PlatformOperation,
+  stepKey: string,
+  event: JsonRecord
+): Promise<void> {
+  if (!PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED || !PLATFORM_NOTIFICATION_SERVICE_URL) {
+    return;
+  }
+
+  const resultJson = asRecord(event.result_json) ?? {};
+  const context = notificationContextForStep(operation, resultJson);
+  if (!Object.keys(context).length) {
+    return;
+  }
+
+  const status = operationStepStatus(event.status, "running");
+  const appId = asString(event.app_id) || appIdFromOperation(operation);
+  const stepTitle = asString(event.step_label) || stepLabel(stepKey);
+  const message = truncate(redactText(asString(event.message, `${stepTitle} is ${status}.`)), 2000);
+  const channels = notificationChannelsForContext(context);
+  const browserPush = asRecord(context.browser_push) ?? {};
+  const fallbackChannels = notificationChannels(context.fallback_channels);
+  const recipients = notificationRecipientsForContext(context, channels);
+  const user = asRecord(context.user) ?? {};
+
+  try {
+    const token = await directusToken();
+    const result = await httpJson<JsonRecord>(`${PLATFORM_NOTIFICATION_SERVICE_URL}/internal/notifications`, {
+      method: "POST",
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      headers: { authorization: `Bearer ${token}` },
+      body: {
+        event_key: `platform.deploy.${operation.operation_type}.${stepKey}.${status}`,
+        source: "platform-deploy-service",
+        severity: notificationSeverityForStep(status),
+        priority: notificationPriorityForStep(status),
+        app_id: appId || undefined,
+        actor_user_id: asString(user.user_id) || undefined,
+        channels,
+        recipients,
+        subject: `Platform ${operation.operation_type}: ${stepTitle} ${status}`,
+        body: message,
+        data: {
+          operation_id: operation.id,
+          operation_type: operation.operation_type,
+          app_id: appId || null,
+          step_key: stepKey,
+          step_label: stepTitle,
+          status,
+          message,
+          result_json: redactJsonRecord(resultJson),
+          error_message: asString(event.error_message) || null
+        },
+        metadata: {
+          notification_context_id: asString(context.context_id) || null,
+          notification_thread_id: asString(context.thread_id, operation.id),
+          requested_at: asString(context.requested_at) || null,
+          selected_channels: channels,
+          fallback_channels: fallbackChannels,
+          fallback_reason: channels.includes("browser_push") ? null : asString(browserPush.reason, "browser_push_unavailable"),
+          browser_push: redactJsonRecord(browserPush),
+          source_step_status: status
+        },
+        idempotency_key: `platform-deploy:${operation.id}:${stepKey}:${status}`,
+        correlation_id: asString(context.thread_id, operation.id)
+      }
+    });
+    if (result.statusCode >= 400) {
+      console.warn(`[platform-deploy-service] notification request failed HTTP ${result.statusCode}: ${truncate(result.text, 700)}`);
+    }
+  } catch (error) {
+    console.warn(`[platform-deploy-service] notification request failed: ${error instanceof Error ? truncate(error.message, 700) : "unknown error"}`);
+  }
+}
+
 function optionalInt(value: unknown): number | undefined {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : undefined;
@@ -756,6 +932,17 @@ async function upsertOperationStep(
   const deterministicStepId = operationStepId(operation.id, stepKey);
   const incomingResult = redactJsonRecord(asRecord(values.result_json) ?? asRecord(values.result) ?? {});
   const durationMs = optionalInt(values.duration_ms);
+  const notificationEvent = (): JsonRecord => ({
+    app_id: appId || undefined,
+    step_label: asString(values.step_label) || asString(values.label) || stepLabel(stepKey),
+    status,
+    message: truncate(redactText(asString(values.message)), 2000) || `${stepLabel(stepKey)} is ${status}.`,
+    result_json: incomingResult,
+    error_message: truncate(redactText(asString(values.error_message)), 4000) || undefined,
+    started_at: asString(values.started_at) || undefined,
+    finished_at: asString(values.finished_at) || undefined,
+    duration_ms: durationMs
+  });
   const buildPatch = (step: PlatformOperationStep | null): JsonRecord => {
     const existingResult = redactJsonRecord(asRecord(step?.result_json) ?? {});
     const patch: JsonRecord = {
@@ -843,6 +1030,7 @@ async function upsertOperationStep(
 
   if (existing?.id) {
     await updateExistingStep(existing);
+    await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
     return;
   }
 
@@ -855,16 +1043,19 @@ async function upsertOperationStep(
         ...buildPatch(null)
       }
     });
+    await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
   } catch (error) {
     if (!isDirectusOperationStepUniqueError(error)) {
       throw error;
     }
 
     if (await updateDeterministicStep()) {
+      await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
       return;
     }
 
     if (await updateExistingStepByUniqueFilter()) {
+      await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
       return;
     }
 
@@ -873,6 +1064,7 @@ async function upsertOperationStep(
       const racedExisting = await getOperationStep(operation.id, stepKey);
       if (racedExisting?.id) {
         await updateExistingStep(racedExisting);
+        await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
         return;
       }
     }
@@ -1142,7 +1334,12 @@ function appIdFromOperation(operation: PlatformOperation): string {
   return typeof operation.app_id === "string" ? operation.app_id : asString(operation.app_id?.id);
 }
 
-function buildRunnerInput(app: PlatformApp, operationType: OperationType, operationId: string): JsonRecord {
+function buildRunnerInput(
+  app: PlatformApp,
+  operationType: OperationType,
+  operationId: string,
+  notificationContext: JsonRecord = {}
+): JsonRecord {
   const sequence = operationSequence(operationType);
   const repository = githubRepository(app);
   return {
@@ -1180,7 +1377,8 @@ function buildRunnerInput(app: PlatformApp, operationType: OperationType, operat
     terraform_run_timeout_seconds: TERRAFORM_RUN_TIMEOUT_SECONDS,
     terraform_run_poll_seconds: TERRAFORM_RUN_POLL_SECONDS,
     openobserve_browser_rum_version: openObserveBrowserRumVersion(app),
-    github_repository_variables: githubRepositoryVariables(app)
+    github_repository_variables: githubRepositoryVariables(app),
+    ...(Object.keys(notificationContext).length ? { notification_context: notificationContext } : {})
   };
 }
 
@@ -1291,7 +1489,30 @@ function operationTypeFromBody(body: JsonRecord, fallback: OperationType): Opera
   return fallback;
 }
 
-async function queueOperation(appId: string, operationType: OperationType): Promise<JsonRecord> {
+function unwrapActionBody(body: unknown): JsonRecord {
+  let current = asRecord(body) ?? {};
+  for (let depth = 0; depth < 4; depth += 1) {
+    const input = asRecord(current.input);
+    if (input) {
+      current = input;
+      continue;
+    }
+    const nestedBody = asRecord(current.body);
+    if (nestedBody) {
+      current = nestedBody;
+      continue;
+    }
+    break;
+  }
+  return current;
+}
+
+function notificationContextFromBody(body: JsonRecord): JsonRecord {
+  const context = asRecord(body.notification_context) ?? asRecord(body.notificationContext) ?? {};
+  return redactJsonRecord(context);
+}
+
+async function queueOperation(appId: string, operationType: OperationType, body: JsonRecord = {}): Promise<JsonRecord> {
   const app = await getApp(appId);
   const activeOperation = await getActiveOperationForApp(app.id);
   if (activeOperation) {
@@ -1315,9 +1536,10 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
     }
   }
 
-  const operationInput = buildRunnerInput(app, operationType, "pending");
+  const notificationContext = notificationContextFromBody(body);
+  const operationInput = buildRunnerInput(app, operationType, "pending", notificationContext);
   const operation = await createOperation(app, operationType, operationInput, executionProvider);
-  const input = buildRunnerInput(app, operationType, operation.id);
+  const input = buildRunnerInput(app, operationType, operation.id, notificationContext);
   await updateOperation(operation.id, { input_json: input });
   await upsertOperationStep(operation, "queued", {
     status: "queued",
@@ -1326,7 +1548,8 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
     result_json: {
       operation_type: operationType,
       sequence: operationSequence(operationType),
-      deployment_strategy: executionProvider
+      deployment_strategy: executionProvider,
+      ...(Object.keys(notificationContext).length ? { notification_context: notificationContext } : {})
     }
   });
 
@@ -1343,7 +1566,8 @@ async function queueOperation(appId: string, operationType: OperationType): Prom
       result_json: {
         prepare_token_sha256: sha256(operationToken),
         prepare_token_expires_at: tokenExpiresAt,
-        prepared_topic: env.PLATFORM_DEPLOY_PREPARED_TOPIC
+        prepared_topic: env.PLATFORM_DEPLOY_PREPARED_TOPIC,
+        ...(Object.keys(notificationContext).length ? { notification_context: notificationContext } : {})
       }
     });
     await upsertOperationStep(operation, "prepare-submit", {
@@ -1447,6 +1671,11 @@ const openApiSpec = {
             type: "string",
             enum: ["create", "update", "redeploy"],
             description: "Deployment operation to queue."
+          },
+          notification_context: {
+            type: "object",
+            additionalProperties: true,
+            description: "Optional browser/fallback notification routing context supplied by the requesting UI."
           }
         }
       },
@@ -1458,6 +1687,11 @@ const openApiSpec = {
             type: "string",
             enum: ["destroy", "delete"],
             description: "Destroy operation to queue."
+          },
+          notification_context: {
+            type: "object",
+            additionalProperties: true,
+            description: "Optional browser/fallback notification routing context supplied by the requesting UI."
           }
         }
       },
@@ -1902,8 +2136,8 @@ app.get("/openapi.json", (_req, res) => {
 app.post("/internal/apps/:id/deploy", async (req, res, next) => {
   try {
     await enforceInternalAuth(req);
-    const body = asRecord(req.body) ?? {};
-    const result = await queueOperation(req.params.id, operationTypeFromBody(body, "redeploy"));
+    const body = unwrapActionBody(req.body);
+    const result = await queueOperation(req.params.id, operationTypeFromBody(body, "redeploy"), body);
     res.status(200).json(result);
   } catch (error) {
     next(error);
@@ -1913,8 +2147,8 @@ app.post("/internal/apps/:id/deploy", async (req, res, next) => {
 app.post("/internal/apps/:id/destroy", async (req, res, next) => {
   try {
     await enforceInternalAuth(req);
-    const body = asRecord(req.body) ?? {};
-    const result = await queueOperation(req.params.id, operationTypeFromBody(body, "destroy"));
+    const body = unwrapActionBody(req.body);
+    const result = await queueOperation(req.params.id, operationTypeFromBody(body, "destroy"), body);
     res.status(200).json(result);
   } catch (error) {
     next(error);
@@ -1945,7 +2179,7 @@ app.get("/internal/secrets/platform-deploy", async (req, res, next) => {
 app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
   try {
     await enforceInternalAuth(req);
-    const body = asRecord(req.body) ?? {};
+    const body = unwrapActionBody(req.body);
     const input = platformDeploySecretsInput(body);
     await writeVaultKv2Data("secret/data/platform-deploy-service", {
       tfe_token: input.tfe_token,
@@ -2000,7 +2234,7 @@ app.post("/internal/operations/:id/start", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
     requireActiveOperation(operation, "start");
-    const body = asRecord(req.body) ?? {};
+    const body = unwrapActionBody(req.body);
     const appId = asString(body.app_id) || appIdFromOperation(operation);
     const operationType = operationTypeFromBody(body, operation.operation_type);
     await updateOperation(req.params.id, {
@@ -2032,7 +2266,7 @@ app.post("/internal/operations/:id/prepared", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
     requireActiveOperation(operation, "prepared");
-    const body = asRecord(req.body) ?? {};
+    const body = unwrapActionBody(req.body);
     const bodyResultJson = asRecord(body.result_json) ?? {};
     const preparedAt = asString(body.prepared_at, new Date().toISOString());
     const preparedTopic = asString(body.prepared_topic, env.PLATFORM_DEPLOY_PREPARED_TOPIC);
@@ -2067,7 +2301,7 @@ app.post("/internal/operations/:id/steps/:stepKey", async (req, res, next) => {
       res.status(200).json(terminalOperationIgnoredPayload(operation, "step"));
       return;
     }
-    const body = asRecord(req.body) ?? {};
+    const body = unwrapActionBody(req.body);
     const stepKey = asString(req.params.stepKey);
     if (!stepKey) {
       throw Object.assign(new Error("stepKey is required."), { status: 422 });
@@ -2105,7 +2339,7 @@ app.post("/internal/operations/:id/finish", async (req, res, next) => {
       res.status(200).json(terminalOperationIgnoredPayload(operation, "finish"));
       return;
     }
-    const body = asRecord(req.body) ?? {};
+    const body = unwrapActionBody(req.body);
     const appId = asString(body.app_id) || appIdFromOperation(operation);
     const operationType = operationTypeFromBody(body, operation.operation_type);
     const succeeded = asString(body.status) === "succeeded";

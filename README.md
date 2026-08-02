@@ -48,6 +48,13 @@ Management UI can read the same rows through the Directus/Hasura
 `platform_app_operation_steps` collection or via
 `GET /internal/operations/{operation_id}/steps`.
 
+When the UI supplies `notification_context`, `platform-deploy-service` preserves
+that context on the operation payload and emits a notification request after each
+step status update. Browser push is selected only when the request context has a
+registered browser subscription; otherwise the configured fallback channels
+(`email` and/or `sms`) are requested. Notification failures are logged but do not
+fail or block the deployment operation.
+
 ## Validation
 
 ```sh
@@ -82,3 +89,7 @@ Set `RETURN_PLATFORM_DEPLOY_SECRET_VALUES=false` on `platform-deploy-service` to
 keep `GET /internal/secrets/platform-deploy` from returning raw secret values.
 When disabled, the endpoint still reports which secret fields are configured and
 returns empty strings for the value fields.
+
+Set `PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED=false` to disable deployment status
+notification requests. `PLATFORM_NOTIFICATION_SERVICE_URL` defaults to the
+in-cluster `platform-notification-service` endpoint.

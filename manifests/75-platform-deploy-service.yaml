@@ -1121,6 +1121,10 @@ spec:
               value: "batch.platform.deploy.prepared.v1"
             - name: PLATFORM_DEPLOY_SERVICE_URL
               value: "http://platform-deploy-service.directus.svc.cluster.local:8080"
+            - name: PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED
+              value: "true"
+            - name: PLATFORM_NOTIFICATION_SERVICE_URL
+              value: "http://platform-notification-service.directus.svc.cluster.local:8080"
             - name: OPERATION_CALLBACK_TOKEN_TTL_SECONDS
               value: "21600"
             - name: GITHUB_API_BASE
