@@ -182,8 +182,6 @@ components:
         - ok
         - app_id
         - operation_id
-        - flink_job_id
-        - prepared_topic
       additionalProperties: true
       properties:
         ok:
@@ -191,6 +189,40 @@ components:
         app_id:
           type: string
         operation_id:
+          type: string
+        operation_type:
+          type: string
+          enum:
+            - create
+            - update
+            - redeploy
+            - delete
+            - destroy
+        requested_operation_type:
+          type: string
+          enum:
+            - create
+            - update
+            - redeploy
+            - delete
+            - destroy
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        active:
+          type: boolean
+        duplicate:
+          type: boolean
+        idempotent:
+          type: boolean
+        reason:
+          type: string
+        message:
           type: string
         flink_job_id:
           type: string

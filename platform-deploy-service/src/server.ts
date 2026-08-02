@@ -75,6 +75,7 @@ type OperationStepStatus = OperationStatus;
 type DeploymentStatus = "not_deployed" | "queued" | "deploying" | "deployed" | "failed" | "destroying" | "destroyed";
 type DeploymentStrategy = "terraform_cloud" | "local_terraform";
 const ACTIVE_OPERATION_STATUSES = new Set<OperationStatus>(["queued", "running"]);
+const queueOperationLocks = new Map<string, Promise<void>>();
 
 type DirectusListResponse<T> = {
   data?: T[];
@@ -616,6 +617,27 @@ function terminalOperationIgnoredPayload(operation: PlatformOperation, callbackN
   };
 }
 
+function activeOperationQueuePayload(
+  app: PlatformApp,
+  operation: PlatformOperation,
+  requestedOperationType: OperationType,
+  reason: string
+): JsonRecord {
+  return {
+    ok: true,
+    app_id: app.id,
+    operation_id: operation.id,
+    operation_type: operation.operation_type,
+    requested_operation_type: requestedOperationType,
+    status: operation.status,
+    active: true,
+    duplicate: true,
+    idempotent: true,
+    reason,
+    message: `Platform app ${app.app_key} already has a ${operation.status} ${operation.operation_type} operation. Returning that operation instead of queueing another.`
+  };
+}
+
 function requireActiveOperation(operation: PlatformOperation, callbackName: string): void {
   if (!operationActive(operation)) {
     throw Object.assign(
@@ -635,6 +657,25 @@ async function getActiveOperationForApp(appId: string): Promise<PlatformOperatio
     `/items/platform_app_operations?${params.toString()}`
   );
   return response.data?.find((operation) => operation.status === "queued" || operation.status === "running") ?? null;
+}
+
+async function withAppQueueLock<T>(appId: string, callback: () => Promise<T>): Promise<T> {
+  const previous = queueOperationLocks.get(appId) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const next = previous.catch(() => undefined).then(() => current);
+  queueOperationLocks.set(appId, next);
+  await previous.catch(() => undefined);
+  try {
+    return await callback();
+  } finally {
+    release();
+    if (queueOperationLocks.get(appId) === next) {
+      queueOperationLocks.delete(appId);
+    }
+  }
 }
 
 async function updateOperation(operationId: string, patch: JsonRecord): Promise<void> {
@@ -1513,9 +1554,16 @@ function notificationContextFromBody(body: JsonRecord): JsonRecord {
 }
 
 async function queueOperation(appId: string, operationType: OperationType, body: JsonRecord = {}): Promise<JsonRecord> {
+  return withAppQueueLock(appId, () => queueOperationUnlocked(appId, operationType, body));
+}
+
+async function queueOperationUnlocked(appId: string, operationType: OperationType, body: JsonRecord = {}): Promise<JsonRecord> {
   const app = await getApp(appId);
   const activeOperation = await getActiveOperationForApp(app.id);
   if (activeOperation) {
+    if (activeOperation.operation_type === operationType) {
+      return activeOperationQueuePayload(app, activeOperation, operationType, "active_operation");
+    }
     throw Object.assign(
       new Error(`Platform app ${app.app_key} already has a ${activeOperation.status} ${activeOperation.operation_type} operation.`),
       { status: 409 }
@@ -1538,7 +1586,25 @@ async function queueOperation(appId: string, operationType: OperationType, body:
 
   const notificationContext = notificationContextFromBody(body);
   const operationInput = buildRunnerInput(app, operationType, "pending", notificationContext);
-  const operation = await createOperation(app, operationType, operationInput, executionProvider);
+  let operation: PlatformOperation;
+  try {
+    operation = await createOperation(app, operationType, operationInput, executionProvider);
+  } catch (error) {
+    const concurrentOperation = await getActiveOperationForApp(app.id);
+    if (concurrentOperation?.operation_type === operationType) {
+      console.warn(
+        `[platform-deploy-service] returning active operation ${concurrentOperation.id} after concurrent queue create failed for app ${app.id}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return activeOperationQueuePayload(app, concurrentOperation, operationType, "concurrent_active_operation");
+    }
+    if (concurrentOperation) {
+      throw Object.assign(
+        new Error(`Platform app ${app.app_key} already has a ${concurrentOperation.status} ${concurrentOperation.operation_type} operation.`),
+        { status: 409 }
+      );
+    }
+    throw error;
+  }
   const input = buildRunnerInput(app, operationType, operation.id, notificationContext);
   await updateOperation(operation.id, { input_json: input });
   await upsertOperationStep(operation, "queued", {
@@ -1697,11 +1763,28 @@ const openApiSpec = {
       },
       QueueOperationResponse: {
         type: "object",
-        required: ["ok", "app_id", "operation_id", "flink_job_id", "prepared_topic"],
+        required: ["ok", "app_id", "operation_id"],
         properties: {
           ok: { type: "boolean" },
           app_id: { type: "string" },
           operation_id: { type: "string" },
+          operation_type: {
+            type: "string",
+            enum: ["create", "update", "redeploy", "delete", "destroy"]
+          },
+          requested_operation_type: {
+            type: "string",
+            enum: ["create", "update", "redeploy", "delete", "destroy"]
+          },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          active: { type: "boolean" },
+          duplicate: { type: "boolean" },
+          idempotent: { type: "boolean" },
+          reason: { type: "string" },
+          message: { type: "string" },
           flink_job_id: { type: "string" },
           prepared_topic: { type: "string" }
         },
