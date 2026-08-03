@@ -994,14 +994,16 @@ data:
       fi
     }
 
+    shell_source_ref="${TEMPLATE_PROD_REF:-${TEMPLATE_PREVIEW_REF:-prod}}"
+
     case "${DEPLOY_SEQUENCE:-create}" in
       destroy)
-        deploy_target "preview" "${TEMPLATE_PREVIEW_REF:-}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "destroy"
-        deploy_target "production" "${TEMPLATE_PROD_REF:-}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "destroy"
+        deploy_target "preview" "${shell_source_ref}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "destroy"
+        deploy_target "production" "${shell_source_ref}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "destroy"
         ;;
       create|recreate)
-        deploy_target "preview" "${TEMPLATE_PREVIEW_REF:-}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "apply"
-        deploy_target "production" "${TEMPLATE_PROD_REF:-}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "apply"
+        deploy_target "preview" "${shell_source_ref}" "${TERRAFORM_WORKSPACE_PREVIEW:-}" "apply"
+        deploy_target "production" "${shell_source_ref}" "${TERRAFORM_WORKSPACE_PRODUCTION:-}" "apply"
         ;;
       *)
         fail "Unsupported DEPLOY_SEQUENCE '${DEPLOY_SEQUENCE:-}'."
@@ -1133,8 +1135,6 @@ spec:
               value: "initial-deploy.yml"
             - name: DEFAULT_GITHUB_PRODUCTION_REF
               value: "prod"
-            - name: DEFAULT_GITHUB_PREVIEW_REF
-              value: "dev"
             - name: TFE_API_BASE
               value: "https://app.terraform.io/api/v2"
             - name: TERRAFORM_RUN_TIMEOUT_SECONDS

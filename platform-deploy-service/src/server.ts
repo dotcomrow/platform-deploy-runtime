@@ -39,7 +39,6 @@ const envSchema = z.object({
   TFE_API_BASE: z.string().default("https://app.terraform.io/api/v2"),
   DEFAULT_INITIAL_DEPLOY_WORKFLOW: z.string().default("initial-deploy.yml"),
   DEFAULT_GITHUB_PRODUCTION_REF: z.string().default("prod"),
-  DEFAULT_GITHUB_PREVIEW_REF: z.string().default("dev"),
   TERRAFORM_RUN_TIMEOUT_SECONDS: z.string().default("7200"),
   TERRAFORM_RUN_POLL_SECONDS: z.string().default("20"),
   DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION: z.string().default("0.3.1"),
@@ -1189,7 +1188,7 @@ function templateProdRef(app: PlatformApp): string {
 }
 
 function templatePreviewRef(app: PlatformApp): string {
-  return asString(repositorySettings(app).previewRef, "dev");
+  return templateProdRef(app);
 }
 
 function keycloakAuthHost(app: PlatformApp): string {
