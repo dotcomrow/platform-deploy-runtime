@@ -44,6 +44,8 @@ const envSchema = z.object({
   DEFAULT_GITHUB_PRODUCTION_REF: z.string().default("prod"),
   TERRAFORM_RUN_TIMEOUT_SECONDS: z.string().default("7200"),
   TERRAFORM_RUN_POLL_SECONDS: z.string().default("20"),
+  TERRAFORM_RUN_RETRY_ATTEMPTS: z.string().default("3"),
+  TERRAFORM_RUN_RETRY_DELAY_SECONDS: z.string().default("60"),
   DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION: z.string().default("0.3.1"),
   DEFAULT_ORG_NAME: z.string().default("suncoast-systems")
 });
@@ -69,6 +71,8 @@ const GITHUB_API_BASE = env.GITHUB_API_BASE.replace(/\/+$/, "");
 const TFE_API_BASE = env.TFE_API_BASE.replace(/\/+$/, "");
 const TERRAFORM_RUN_TIMEOUT_SECONDS = Math.max(300, Number(env.TERRAFORM_RUN_TIMEOUT_SECONDS) || 7200);
 const TERRAFORM_RUN_POLL_SECONDS = Math.max(5, Number(env.TERRAFORM_RUN_POLL_SECONDS) || 20);
+const TERRAFORM_RUN_RETRY_ATTEMPTS = Math.max(1, Math.min(10, Number(env.TERRAFORM_RUN_RETRY_ATTEMPTS) || 3));
+const TERRAFORM_RUN_RETRY_DELAY_SECONDS = Math.max(1, Math.min(600, Number(env.TERRAFORM_RUN_RETRY_DELAY_SECONDS) || 60));
 
 type JsonRecord = Record<string, unknown>;
 type OperationType = "create" | "update" | "redeploy" | "delete" | "destroy";
@@ -1433,6 +1437,8 @@ function buildRunnerInput(
     tfe_api_base: TFE_API_BASE,
     terraform_run_timeout_seconds: TERRAFORM_RUN_TIMEOUT_SECONDS,
     terraform_run_poll_seconds: TERRAFORM_RUN_POLL_SECONDS,
+    terraform_run_retry_attempts: TERRAFORM_RUN_RETRY_ATTEMPTS,
+    terraform_run_retry_delay_seconds: TERRAFORM_RUN_RETRY_DELAY_SECONDS,
     openobserve_browser_rum_version: openObserveBrowserRumVersion(app),
     github_repository_variables: githubRepositoryVariables(app),
     ...(Object.keys(notificationContext).length ? { notification_context: notificationContext } : {})
