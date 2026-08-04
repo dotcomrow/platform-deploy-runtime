@@ -34,6 +34,9 @@ const envSchema = z.object({
   PLATFORM_DEPLOY_SERVICE_URL: z.string().default("http://platform-deploy-service.directus.svc.cluster.local:8080"),
   PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED: z.string().default("true"),
   PLATFORM_NOTIFICATION_SERVICE_URL: z.string().default("http://platform-notification-service.directus.svc.cluster.local:8080"),
+  PLATFORM_NOTIFICATION_TOKEN: z.string().default(""),
+  PLATFORM_NOTIFICATION_TOKEN_VAULT_PATH: z.string().default("secret/data/platform-notification-service/clients/platform-deploy-service"),
+  PLATFORM_NOTIFICATION_TOKEN_VAULT_KEY: z.string().default("token"),
   OPERATION_CALLBACK_TOKEN_TTL_SECONDS: z.string().default("21600"),
   GITHUB_API_BASE: z.string().default("https://api.github.com"),
   TFE_API_BASE: z.string().default("https://app.terraform.io/api/v2"),
@@ -475,6 +478,16 @@ async function internalToken(): Promise<string> {
   return vaultValue(env.INTERNAL_TOKEN_VAULT_PATH, env.INTERNAL_TOKEN_VAULT_KEY);
 }
 
+async function platformNotificationToken(): Promise<string> {
+  if (env.PLATFORM_NOTIFICATION_TOKEN) {
+    return env.PLATFORM_NOTIFICATION_TOKEN;
+  }
+  if (!env.PLATFORM_NOTIFICATION_TOKEN_VAULT_PATH) {
+    return "";
+  }
+  return vaultValue(env.PLATFORM_NOTIFICATION_TOKEN_VAULT_PATH, env.PLATFORM_NOTIFICATION_TOKEN_VAULT_KEY);
+}
+
 async function acceptedServiceAuthTokens(): Promise<string[]> {
   const tokens = new Set<string>();
   const expectedInternal = await internalToken();
@@ -843,7 +856,11 @@ async function emitPlatformOperationStepNotification(
   const user = asRecord(context.user) ?? {};
 
   try {
-    const token = await directusToken();
+    const token = await platformNotificationToken();
+    if (!token) {
+      console.warn("[platform-deploy-service] notification token is not configured.");
+      return;
+    }
     const result = await httpJson<JsonRecord>(`${PLATFORM_NOTIFICATION_SERVICE_URL}/internal/notifications`, {
       method: "POST",
       timeoutMs: REQUEST_TIMEOUT_MS,

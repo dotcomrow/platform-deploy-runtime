@@ -127,6 +127,10 @@ spec:
               path "secret/data/directus/gravitee/clients/${graphql_api_client_id}" {
                 capabilities = ["read"]
               }
+
+              path "secret/data/platform-notification-service/clients/platform-deploy-service" {
+                capabilities = ["read"]
+              }
               EOF
 
               policy_payload="$(jq -Rs '{policy:.}' /tmp/platform-deploy-service-policy.hcl)"
@@ -1127,6 +1131,10 @@ spec:
               value: "true"
             - name: PLATFORM_NOTIFICATION_SERVICE_URL
               value: "http://platform-notification-service.directus.svc.cluster.local:8080"
+            - name: PLATFORM_NOTIFICATION_TOKEN_VAULT_PATH
+              value: "secret/data/platform-notification-service/clients/platform-deploy-service"
+            - name: PLATFORM_NOTIFICATION_TOKEN_VAULT_KEY
+              value: "token"
             - name: OPERATION_CALLBACK_TOKEN_TTL_SECONDS
               value: "21600"
             - name: GITHUB_API_BASE
