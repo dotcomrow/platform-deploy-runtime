@@ -858,6 +858,14 @@ async function emitPlatformOperationStepNotification(
   const fallbackChannels = notificationChannels(context.fallback_channels);
   const recipients = notificationRecipientsForContext(context, channels);
   const user = asRecord(context.user) ?? {};
+  const errorMessage = asString(event.error_message) || null;
+  const redactedResultJson = redactJsonRecord(resultJson);
+  const eventFingerprint = sha256(JSON.stringify({
+    status,
+    message,
+    result_json: redactedResultJson,
+    error_message: errorMessage
+  })).slice(0, 16);
 
   try {
     const token = await platformNotificationToken();
@@ -888,8 +896,8 @@ async function emitPlatformOperationStepNotification(
           step_label: stepTitle,
           status,
           message,
-          result_json: redactJsonRecord(resultJson),
-          error_message: asString(event.error_message) || null
+          result_json: redactedResultJson,
+          error_message: errorMessage
         },
         metadata: {
           notification_context_id: asString(context.context_id) || null,
@@ -901,7 +909,7 @@ async function emitPlatformOperationStepNotification(
           browser_push: redactJsonRecord(browserPush),
           source_step_status: status
         },
-        idempotency_key: `platform-deploy:${operation.id}:${stepKey}:${status}`,
+        idempotency_key: `platform-deploy:${operation.id}:${stepKey}:${status}:${eventFingerprint}`,
         correlation_id: asString(context.thread_id, operation.id)
       }
     });
