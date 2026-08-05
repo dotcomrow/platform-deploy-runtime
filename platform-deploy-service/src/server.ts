@@ -1411,12 +1411,14 @@ function buildRunnerInput(
 ): JsonRecord {
   const sequence = operationSequence(operationType);
   const repository = githubRepository(app);
+  const organization = organizationFromApp(app);
   return {
     operation_id: operationId,
     operation_type: operationType,
     sequence,
     deployment_strategy: deploymentStrategy(app),
     app_id: app.id,
+    organization_id: organization?.id || "",
     app_key: app.app_key,
     site_key: app.site_key,
     keycloak_realm: app.keycloak_realm,

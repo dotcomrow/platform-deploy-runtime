@@ -755,6 +755,8 @@ data:
       tfe_upsert_var "${workspace_id}" "app_auth_app_slug_preview" "${APP_AUTH_APP_SLUG_PREVIEW_EFFECTIVE}" "auth gateway app slug for preview login"
       tfe_upsert_var "${workspace_id}" "app_auth_base_url_production" "${APP_AUTH_BASE_URL_PRODUCTION_EFFECTIVE}" "auth gateway base URL for production app registration"
       tfe_upsert_var "${workspace_id}" "app_auth_base_url_preview" "${APP_AUTH_BASE_URL_PREVIEW_EFFECTIVE}" "auth gateway base URL for preview app registration"
+      tfe_upsert_var "${workspace_id}" "platform_notification_organization_id" "${ORGANIZATION_ID:-}" "platform notification organization scope"
+      tfe_upsert_var "${workspace_id}" "platform_notification_app_id" "${APP_ID}" "platform notification app scope"
       tfe_upsert_var "${workspace_id}" "deployment_environment" "${deployment_environment}" "deployment environment"
       tfe_upsert_var "${workspace_id}" "d1_dev_cache_name" "${D1_DEV_CACHE_NAME}" "preview D1 cache database name"
       tfe_upsert_var "${workspace_id}" "d1_prod_cache_name" "${D1_PROD_CACHE_NAME}" "production D1 cache database name"
@@ -938,6 +940,8 @@ data:
     export TF_IN_AUTOMATION=true
     export TF_INPUT=false
     export TF_VAR_app_id="${APP_ID}"
+    export TF_VAR_platform_notification_organization_id="${ORGANIZATION_ID:-}"
+    export TF_VAR_platform_notification_app_id="${APP_ID}"
     export TF_VAR_app_key="${APP_KEY}"
     export TF_VAR_site_key="${SITE_KEY:-}"
     export TF_VAR_keycloak_realm="${KEYCLOAK_REALM:-external}"
