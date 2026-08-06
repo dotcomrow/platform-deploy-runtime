@@ -65,6 +65,7 @@ const VAULT_PATH_REF_PATTERN = /<path:([^#>]+)#([^>]+)>/g;
 const FLINK_REST_URL = env.FLINK_REST_URL.replace(/\/+$/, "");
 const PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED = asBoolean(env.PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED, true);
 const PLATFORM_NOTIFICATION_SERVICE_URL = env.PLATFORM_NOTIFICATION_SERVICE_URL.replace(/\/+$/, "");
+const PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY = "platform.deploy.operation-step";
 const FLINK_PARALLELISM = Math.max(1, Number(env.FLINK_PARALLELISM) || 1);
 const OPERATION_CALLBACK_TOKEN_TTL_SECONDS = Math.max(300, Number(env.OPERATION_CALLBACK_TOKEN_TTL_SECONDS) || 21_600);
 const GITHUB_API_BASE = env.GITHUB_API_BASE.replace(/\/+$/, "");
@@ -860,6 +861,17 @@ async function emitPlatformOperationStepNotification(
   const user = asRecord(context.user) ?? {};
   const errorMessage = asString(event.error_message) || null;
   const redactedResultJson = redactJsonRecord(resultJson);
+  const parameters = {
+    operation_id: operation.id,
+    operation_type: operation.operation_type,
+    app_id: appId || null,
+    step_key: stepKey,
+    step_label: stepTitle,
+    status,
+    message,
+    result_json: redactedResultJson,
+    error_message: errorMessage
+  };
   const eventFingerprint = sha256(JSON.stringify({
     status,
     message,
@@ -884,21 +896,11 @@ async function emitPlatformOperationStepNotification(
         priority: notificationPriorityForStep(status),
         app_id: appId || undefined,
         actor_user_id: asString(user.user_id) || undefined,
+        notification_key: PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY,
         channels,
         recipients,
-        subject: `Platform ${operation.operation_type}: ${stepTitle} ${status}`,
-        body: message,
-        data: {
-          operation_id: operation.id,
-          operation_type: operation.operation_type,
-          app_id: appId || null,
-          step_key: stepKey,
-          step_label: stepTitle,
-          status,
-          message,
-          result_json: redactedResultJson,
-          error_message: errorMessage
-        },
+        parameters,
+        data: parameters,
         metadata: {
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id, operation.id),
