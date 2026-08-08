@@ -128,6 +128,10 @@ spec:
                 capabilities = ["read"]
               }
 
+              path "secret/data/directus/gravitee/clients/internal/graphql-api" {
+                capabilities = ["read"]
+              }
+
               path "secret/data/platform-notification-service/clients/platform-deploy-service" {
                 capabilities = ["read"]
               }
@@ -1104,7 +1108,7 @@ spec:
             - name: DIRECTUS_HEALTH_PATH
               value: "/server/health"
             - name: DIRECTUS_TOKEN_VAULT_PATH
-              value: "secret/data/directus/gravitee/clients/<path:secret/data/keycloak-client-id-graphql-api#value>"
+              value: "secret/data/directus/gravitee/clients/internal/graphql-api"
             - name: DIRECTUS_TOKEN_VAULT_KEY
               value: "token"
             - name: INTERNAL_TOKEN_VAULT_PATH
