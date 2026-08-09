@@ -129,6 +129,11 @@ type PlatformOperation = {
   operation_type: OperationType;
   status: OperationStatus;
   result_json?: JsonRecord | null;
+  error_message?: string | null;
+  requested_at?: string | null;
+  finished_at?: string | null;
+  date_created?: string | null;
+  date_updated?: string | null;
 };
 
 type NotificationChannel = "browser_push" | "email" | "sms";
@@ -608,12 +613,28 @@ async function createOperation(
 }
 
 async function getOperation(operationId: string): Promise<PlatformOperation> {
-  const fields = "id,app_id,operation_type,status,result_json";
-  const response = await directusJson<DirectusItemResponse<PlatformOperation>>(
-    `/items/platform_app_operations/${encodeURIComponent(operationId)}${queryString({ fields, _cb: randomUUID() })}`
-  );
-  const operation = response.data;
+  const fields = "id,app_id,operation_type,status,result_json,error_message,requested_at,finished_at,date_created,date_updated";
+  const [directResult, filteredResult] = await Promise.allSettled([
+    directusJson<DirectusItemResponse<PlatformOperation>>(
+      `/items/platform_app_operations/${encodeURIComponent(operationId)}${queryString({ fields, _cb: randomUUID() })}`
+    ),
+    directusJson<DirectusListResponse<PlatformOperation>>(
+      `/items/platform_app_operations${queryString({
+        fields,
+        "filter[id][_eq]": operationId,
+        sort: "-date_updated,-finished_at,-date_created",
+        limit: 1,
+        _cb: randomUUID()
+      })}`
+    )
+  ]);
+  const directOperation = directResult.status === "fulfilled" ? directResult.value.data ?? null : null;
+  const filteredOperation = filteredResult.status === "fulfilled" ? filteredResult.value.data?.[0] ?? null : null;
+  const operation = newestStatusRecord(directOperation, filteredOperation);
   if (!operation?.id) {
+    if (directResult.status === "rejected" && filteredResult.status === "rejected") {
+      throw directResult.reason;
+    }
     throw Object.assign(new Error(`Platform operation ${operationId} was not found`), { status: 404 });
   }
   return operation;
@@ -974,6 +995,47 @@ function isDirectusOperationStepUniqueError(error: unknown): boolean {
     && (message.includes("unique") || message.includes("duplicate"));
 }
 
+function statusRecordTimestamp(record: {
+  date_updated?: string | null;
+  finished_at?: string | null;
+  date_created?: string | null;
+  requested_at?: string | null;
+} | null | undefined): number {
+  const value = asString(record?.date_updated)
+    || asString(record?.finished_at)
+    || asString(record?.date_created)
+    || asString(record?.requested_at);
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function statusTerminal(status: unknown): boolean {
+  const normalized = asString(status).toLowerCase();
+  return normalized === "succeeded" || normalized === "failed" || normalized === "canceled";
+}
+
+function newestStatusRecord<T extends {
+  status?: string | null;
+  date_updated?: string | null;
+  finished_at?: string | null;
+  date_created?: string | null;
+  requested_at?: string | null;
+}>(left: T | null | undefined, right: T | null | undefined): T | null {
+  if (!left) {
+    return right ?? null;
+  }
+  if (!right) {
+    return left;
+  }
+
+  const leftTerminal = statusTerminal(left.status);
+  const rightTerminal = statusTerminal(right.status);
+  if (leftTerminal !== rightTerminal) {
+    return rightTerminal ? right : left;
+  }
+  return statusRecordTimestamp(right) > statusRecordTimestamp(left) ? right : left;
+}
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -991,28 +1053,27 @@ function operationStepId(operationId: string, stepKey: string): string {
 
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
   const deterministicStepId = operationStepId(operationId, stepKey);
-  try {
-    const directResponse = await directusJson<DirectusItemResponse<PlatformOperationStep>>(
+  const [directResult, filteredResult] = await Promise.allSettled([
+    directusJson<DirectusItemResponse<PlatformOperationStep>>(
       `/items/platform_app_operation_steps/${encodeURIComponent(deterministicStepId)}${queryString({ fields: OPERATION_STEP_FIELDS, _cb: randomUUID() })}`
-    );
-    if (directResponse.data?.id) {
-      return directResponse.data;
-    }
-  } catch {
-    // Older rows may not use deterministic ids; fall back to the unique fields.
+    ),
+    directusJson<DirectusListResponse<PlatformOperationStep>>(
+      `/items/platform_app_operation_steps${queryString({
+        fields: OPERATION_STEP_FIELDS,
+        "filter[operation_id][_eq]": operationId,
+        "filter[step_key][_eq]": stepKey,
+        sort: "-date_updated,-finished_at,-date_created",
+        limit: 1,
+        _cb: randomUUID()
+      })}`
+    )
+  ]);
+  const directStep = directResult.status === "fulfilled" ? directResult.value.data ?? null : null;
+  const filteredStep = filteredResult.status === "fulfilled" ? filteredResult.value.data?.[0] ?? null : null;
+  if (!directStep && !filteredStep && directResult.status === "rejected" && filteredResult.status === "rejected") {
+    throw directResult.reason;
   }
-
-  const params = new URLSearchParams();
-  params.set("fields", OPERATION_STEP_FIELDS);
-  params.set("filter[operation_id][_eq]", operationId);
-  params.set("filter[step_key][_eq]", stepKey);
-  params.set("sort", "-date_updated,-date_created");
-  params.set("limit", "1");
-  params.set("_cb", randomUUID());
-  const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
-    `/items/platform_app_operation_steps?${params.toString()}`
-  );
-  return response.data?.[0] ?? null;
+  return newestStatusRecord(directStep, filteredStep);
 }
 
 async function listOperationSteps(operationId: string): Promise<PlatformOperationStep[]> {
