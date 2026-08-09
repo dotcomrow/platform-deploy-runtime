@@ -609,14 +609,10 @@ async function createOperation(
 
 async function getOperation(operationId: string): Promise<PlatformOperation> {
   const fields = "id,app_id,operation_type,status,result_json";
-  const params = new URLSearchParams();
-  params.set("fields", fields);
-  params.set("filter[id][_eq]", operationId);
-  params.set("limit", "1");
-  const response = await directusJson<DirectusListResponse<PlatformOperation>>(
-    `/items/platform_app_operations?${params.toString()}`
+  const response = await directusJson<DirectusItemResponse<PlatformOperation>>(
+    `/items/platform_app_operations/${encodeURIComponent(operationId)}${queryString({ fields, _cb: randomUUID() })}`
   );
-  const operation = response.data?.[0];
+  const operation = response.data;
   if (!operation?.id) {
     throw Object.assign(new Error(`Platform operation ${operationId} was not found`), { status: 404 });
   }
@@ -994,6 +990,18 @@ function operationStepId(operationId: string, stepKey: string): string {
 }
 
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
+  const deterministicStepId = operationStepId(operationId, stepKey);
+  try {
+    const directResponse = await directusJson<DirectusItemResponse<PlatformOperationStep>>(
+      `/items/platform_app_operation_steps/${encodeURIComponent(deterministicStepId)}${queryString({ fields: OPERATION_STEP_FIELDS, _cb: randomUUID() })}`
+    );
+    if (directResponse.data?.id) {
+      return directResponse.data;
+    }
+  } catch {
+    // Older rows may not use deterministic ids; fall back to the unique fields.
+  }
+
   const params = new URLSearchParams();
   params.set("fields", OPERATION_STEP_FIELDS);
   params.set("filter[operation_id][_eq]", operationId);
