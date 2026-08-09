@@ -609,13 +609,18 @@ async function createOperation(
 
 async function getOperation(operationId: string): Promise<PlatformOperation> {
   const fields = "id,app_id,operation_type,status,result_json";
-  const response = await directusJson<DirectusItemResponse<PlatformOperation>>(
-    `/items/platform_app_operations/${encodeURIComponent(operationId)}${queryString({ fields })}`
+  const params = new URLSearchParams();
+  params.set("fields", fields);
+  params.set("filter[id][_eq]", operationId);
+  params.set("limit", "1");
+  const response = await directusJson<DirectusListResponse<PlatformOperation>>(
+    `/items/platform_app_operations?${params.toString()}`
   );
-  if (!response.data?.id) {
+  const operation = response.data?.[0];
+  if (!operation?.id) {
     throw Object.assign(new Error(`Platform operation ${operationId} was not found`), { status: 404 });
   }
-  return response.data;
+  return operation;
 }
 
 function operationActive(operation: PlatformOperation): boolean {
