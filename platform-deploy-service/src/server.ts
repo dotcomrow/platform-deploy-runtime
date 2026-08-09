@@ -510,10 +510,18 @@ async function acceptedServiceAuthTokens(): Promise<string[]> {
   return [...tokens];
 }
 
+function directusPath(path: string, method: Dispatcher.HttpMethod): string {
+  if (method !== "GET" || path.includes("_cb=")) {
+    return path;
+  }
+  return `${path}${path.includes("?") ? "&" : "?"}_cb=${encodeURIComponent(randomUUID())}`;
+}
+
 async function directusJson<T>(path: string, init: { method?: Dispatcher.HttpMethod; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
   const token = await directusToken();
   const method = init.method ?? "GET";
-  const result = await httpJson<unknown>(`${DIRECTUS_BASE_URL}${path}`, {
+  const requestPath = directusPath(path, method);
+  const result = await httpJson<unknown>(`${DIRECTUS_BASE_URL}${requestPath}`, {
     method,
     body: init.body,
     timeoutMs: init.timeoutMs ?? REQUEST_TIMEOUT_MS,
@@ -523,7 +531,7 @@ async function directusJson<T>(path: string, init: { method?: Dispatcher.HttpMet
     }
   });
   if (result.statusCode >= 400) {
-    throw new Error(`Directus ${method} ${path} failed: ${result.statusCode} ${truncate(extractErrorMessage(result.payload, result.text), 700)}`);
+    throw new Error(`Directus ${method} ${requestPath} failed: ${result.statusCode} ${truncate(extractErrorMessage(result.payload, result.text), 700)}`);
   }
   return result.payload as T;
 }
