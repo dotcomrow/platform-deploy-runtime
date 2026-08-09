@@ -753,6 +753,37 @@ function stepLabel(stepKey: string): string {
     .join(" ");
 }
 
+const OPERATION_STEP_KEYS = [
+  "queued",
+  "prepare",
+  "prepare-submit",
+  "orchestration",
+  "preview-destroy",
+  "prod-destroy",
+  "prod-deploy",
+  "preview-deploy",
+  "finish"
+];
+
+const OPERATION_STEP_FIELDS = [
+  "id",
+  "operation_id",
+  "app_id",
+  "step_key",
+  "step_label",
+  "status",
+  "sequence",
+  "message",
+  "result_json",
+  "error_message",
+  "log_excerpt",
+  "started_at",
+  "finished_at",
+  "duration_ms",
+  "date_created",
+  "date_updated"
+].join(",");
+
 function stringList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map((entry) => asString(entry)).filter(Boolean);
@@ -964,44 +995,30 @@ function operationStepId(operationId: string, stepKey: string): string {
 
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
   const params = new URLSearchParams();
-  params.set("fields", "id,operation_id,app_id,step_key,status,result_json");
+  params.set("fields", OPERATION_STEP_FIELDS);
   params.set("filter[operation_id][_eq]", operationId);
-  params.set("sort", "sequence,date_created");
-  params.set("limit", "100");
+  params.set("filter[step_key][_eq]", stepKey);
+  params.set("sort", "-date_updated,-date_created");
+  params.set("limit", "1");
   params.set("_cb", randomUUID());
   const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
     `/items/platform_app_operation_steps?${params.toString()}`
   );
-  return response.data?.find((step) => step.step_key === stepKey) ?? null;
+  return response.data?.[0] ?? null;
 }
 
 async function listOperationSteps(operationId: string): Promise<PlatformOperationStep[]> {
-  const params = new URLSearchParams();
-  params.set("fields", [
-    "id",
-    "operation_id",
-    "app_id",
-    "step_key",
-    "step_label",
-    "status",
-    "sequence",
-    "message",
-    "result_json",
-    "error_message",
-    "log_excerpt",
-    "started_at",
-    "finished_at",
-    "duration_ms",
-    "date_created",
-    "date_updated"
-  ].join(","));
-  params.set("filter[operation_id][_eq]", operationId);
-  params.set("sort", "sequence,date_created");
-  params.set("limit", "100");
-  const response = await directusJson<DirectusListResponse<PlatformOperationStep>>(
-    `/items/platform_app_operation_steps?${params.toString()}`
-  );
-  return response.data ?? [];
+  const steps = await Promise.all(OPERATION_STEP_KEYS.map((stepKey) => getOperationStep(operationId, stepKey)));
+  return steps
+    .filter((step): step is PlatformOperationStep => Boolean(step))
+    .sort((left, right) => {
+      const leftSequence = optionalInt(left.sequence) ?? stepSequence(left.step_key);
+      const rightSequence = optionalInt(right.sequence) ?? stepSequence(right.step_key);
+      if (leftSequence !== rightSequence) {
+        return leftSequence - rightSequence;
+      }
+      return asString(left.date_created).localeCompare(asString(right.date_created));
+    });
 }
 
 async function upsertOperationStep(
@@ -2438,6 +2455,20 @@ app.post("/internal/operations/:id/steps/:stepKey", async (req, res, next) => {
     }
     await upsertOperationStep(operation, stepKey, body);
     res.status(200).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/internal/operations/:id/steps/:stepKey", async (req, res, next) => {
+  try {
+    await enforceInternalOrOperationAuth(req, req.params.id);
+    const stepKey = asString(req.params.stepKey);
+    if (!stepKey) {
+      throw Object.assign(new Error("stepKey is required."), { status: 422 });
+    }
+    const step = await getOperationStep(req.params.id, stepKey);
+    res.status(200).json({ ok: true, operation_id: req.params.id, step_key: stepKey, step });
   } catch (error) {
     next(error);
   }
