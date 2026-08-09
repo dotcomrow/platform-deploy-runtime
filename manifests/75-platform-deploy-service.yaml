@@ -69,6 +69,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
     argocd.argoproj.io/sync-options: Force=true
+    platform.suncoast.systems/vault-policy-owner: "platform-deploy-runtime"
 spec:
   backoffLimit: 3
   template:
