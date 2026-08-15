@@ -178,14 +178,22 @@ spec:
               if [ "${code}" = "200" ]; then
                 service_token="$(jq -r '.data.data.token // empty' /tmp/platform-deploy-token.json)"
                 existing_secret_data="$(jq -c '.data.data // {}' /tmp/platform-deploy-token.json)"
+                github_auth_mode="$(jq -r '.data.data.github_auth_mode // .data.data.auth_mode // empty' /tmp/platform-deploy-token.json)"
                 github_token="$(jq -r '.data.data.github_token // .data.data["github-token"] // empty' /tmp/platform-deploy-token.json)"
+                github_app_id="$(jq -r '.data.data.github_app_id // .data.data.app_id // .data.data["github-app-id"] // empty' /tmp/platform-deploy-token.json)"
+                github_app_installation_id="$(jq -r '.data.data.github_app_installation_id // .data.data.installation_id // .data.data["github-app-installation-id"] // empty' /tmp/platform-deploy-token.json)"
+                github_app_private_key="$(jq -r '.data.data.github_app_private_key // .data.data.private_key // .data.data["github-app-private-key"] // empty' /tmp/platform-deploy-token.json)"
                 tfe_token="$(jq -r '.data.data.tfe_token // .data.data["tfe-token"] // .data.data.tf_api_token // empty' /tmp/platform-deploy-token.json)"
                 tfe_agent_pool_id="$(jq -r '.data.data.tfe_agent_pool_id // .data.data["tfe-agent-pool-id"] // empty' /tmp/platform-deploy-token.json)"
                 tfe_organization="$(jq -r '.data.data.tfe_organization // .data.data["tfe-organization"] // .data.data.tf_cloud_organization // empty' /tmp/platform-deploy-token.json)"
               else
                 service_token=""
                 existing_secret_data="{}"
+                github_auth_mode=""
                 github_token=""
+                github_app_id=""
+                github_app_installation_id=""
+                github_app_private_key=""
                 tfe_token=""
                 tfe_agent_pool_id=""
                 tfe_organization=""
@@ -220,7 +228,11 @@ spec:
                   -H "X-Vault-Token: ${VAULT_TOKEN}" \
                   "${VAULT_ADDR}/v1/secret/data/platform-deploy-service/github" || true)"
                 if [ "${github_code}" = "200" ]; then
+                  github_auth_mode="$(jq -r '.data.data.github_auth_mode // .data.data.auth_mode // empty' /tmp/platform-deploy-github-token.json)"
                   github_token="$(jq -r '.data.data.token // .data.data.github_token // .data.data["github-token"] // empty' /tmp/platform-deploy-github-token.json)"
+                  github_app_id="$(jq -r '.data.data.github_app_id // .data.data.app_id // .data.data["github-app-id"] // empty' /tmp/platform-deploy-github-token.json)"
+                  github_app_installation_id="$(jq -r '.data.data.github_app_installation_id // .data.data.installation_id // .data.data["github-app-installation-id"] // empty' /tmp/platform-deploy-github-token.json)"
+                  github_app_private_key="$(jq -r '.data.data.github_app_private_key // .data.data.private_key // .data.data["github-app-private-key"] // empty' /tmp/platform-deploy-github-token.json)"
                 fi
               fi
 
@@ -238,8 +250,10 @@ spec:
                 github_patch="$(jq -nc --arg githubToken "${github_token_b64}" '{data:{"github-token":$githubToken}}')"
                 kubectl -n directus patch secret platform-deploy-secrets --type merge -p "${github_patch}"
                 echo "GitHub repository token is present in Kubernetes Secret."
+              elif [ "${github_auth_mode}" = "github_app" ] && [ -n "${github_app_id}" ] && [ "${github_app_id}" != "null" ] && [ -n "${github_app_installation_id}" ] && [ "${github_app_installation_id}" != "null" ] && [ -n "${github_app_private_key}" ] && [ "${github_app_private_key}" != "null" ]; then
+                echo "GitHub App source credentials are present in Vault; executor will mint installation tokens at runtime."
               else
-                echo "GitHub repository token was not found in Vault; terraform_cloud platform deploys require platform-deploy-secrets.github-token."
+                echo "GitHub source credentials were not found in Vault; terraform_cloud platform deploys require a GitHub token or GitHub App credentials."
               fi
 
               terraform_patch="$(jq -nc \

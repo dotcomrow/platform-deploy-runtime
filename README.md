@@ -76,11 +76,13 @@ the token forwarded by Gravitee after it exchanges the user bearer token through
 `directus-auth-bridge`.
 
 `GET /internal/secrets/platform-deploy` loads the operator-managed Terraform
-Cloud, Cloudflare, and source clone credentials for the Organization Management
-dialog. `POST /internal/secrets/platform-deploy` writes those same fields to
-Vault paths `secret/data/platform-deploy-service` and
+Cloud, Cloudflare, and GitHub source credentials for the Organization Management
+dialog. GitHub source access can use either `github_token` or GitHub App fields
+`github_app_id`, `github_app_installation_id`, and `github_app_private_key`.
+`POST /internal/secrets/platform-deploy` writes those same fields to Vault paths
+`secret/data/platform-deploy-service` and
 `secret/data/platform-deploy-service/github`; `github_token` is also kept on the
-main path so the full dialog field set is visible together. The auth gateway admin token is
+main path for backwards compatibility. The auth gateway admin token is
 resolved from the existing internal `secret/data/auth-gateway-admin-api#value`
 secret, not from this UI/API. The service merges submitted keys with existing
 KV data so internal tokens remain intact.

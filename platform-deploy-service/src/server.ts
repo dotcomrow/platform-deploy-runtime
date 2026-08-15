@@ -81,6 +81,7 @@ type OperationStatus = "queued" | "running" | "succeeded" | "failed" | "canceled
 type OperationStepStatus = OperationStatus;
 type DeploymentStatus = "not_deployed" | "queued" | "deploying" | "deployed" | "failed" | "destroying" | "destroyed";
 type DeploymentStrategy = "terraform_cloud" | "local_terraform";
+type GitHubSourceAuthMode = "token" | "github_app";
 const ACTIVE_OPERATION_STATUSES = new Set<OperationStatus>(["queued", "running"]);
 const queueOperationLocks = new Map<string, Promise<void>>();
 
@@ -164,7 +165,11 @@ type PlatformDeploySecretsInput = {
   cloudflare_token: string;
   cloudflare_account_id: string;
   cloudflare_zone_id: string;
+  github_auth_mode: GitHubSourceAuthMode;
   github_token: string;
+  github_app_id: string;
+  github_app_installation_id: string;
+  github_app_private_key: string;
 };
 
 const emptyPlatformDeploySecrets = (): PlatformDeploySecretsInput => ({
@@ -174,7 +179,11 @@ const emptyPlatformDeploySecrets = (): PlatformDeploySecretsInput => ({
   cloudflare_token: "",
   cloudflare_account_id: "",
   cloudflare_zone_id: "",
-  github_token: ""
+  github_auth_mode: "token",
+  github_token: "",
+  github_app_id: "",
+  github_app_installation_id: "",
+  github_app_private_key: ""
 });
 
 type VaultCacheEntry = {
@@ -207,6 +216,11 @@ function asBoolean(value: unknown, fallback = false): boolean {
     if (["false", "0", "no", "off"].includes(normalized)) return false;
   }
   return fallback;
+}
+
+function githubSourceAuthMode(value: unknown, fallback: GitHubSourceAuthMode = "token"): GitHubSourceAuthMode {
+  const normalized = asString(value).toLowerCase();
+  return normalized === "github_app" ? "github_app" : fallback;
 }
 
 function truncate(value: string, max = 1200): string {
@@ -421,8 +435,11 @@ async function writeVaultKv2Data(path: string, patch: JsonRecord, removeKeys: st
   }
 }
 
-function platformDeploySecretsInput(body: JsonRecord): PlatformDeploySecretsInput {
+function platformDeploySecretsInput(body: JsonRecord, options: {
+  githubAppPrivateKeyConfigured?: boolean;
+} = {}): PlatformDeploySecretsInput {
   const candidate = asRecord(body.body) ?? body;
+  const githubAuthMode = githubSourceAuthMode(candidate.github_auth_mode, "token");
   const input: PlatformDeploySecretsInput = {
     tfe_token: asString(candidate.tfe_token),
     tfe_agent_pool_id: asString(candidate.tfe_agent_pool_id),
@@ -430,9 +447,29 @@ function platformDeploySecretsInput(body: JsonRecord): PlatformDeploySecretsInpu
     cloudflare_token: asString(candidate.cloudflare_token),
     cloudflare_account_id: asString(candidate.cloudflare_account_id),
     cloudflare_zone_id: asString(candidate.cloudflare_zone_id),
-    github_token: asString(candidate.github_token)
+    github_auth_mode: githubAuthMode,
+    github_token: asString(candidate.github_token),
+    github_app_id: asString(candidate.github_app_id),
+    github_app_installation_id: asString(candidate.github_app_installation_id),
+    github_app_private_key: asString(candidate.github_app_private_key)
   };
-  const missing = Object.entries(input)
+  const commonKeys: Array<keyof PlatformDeploySecretsInput> = [
+    "tfe_token",
+    "tfe_agent_pool_id",
+    "tfe_organization",
+    "cloudflare_token",
+    "cloudflare_account_id",
+    "cloudflare_zone_id"
+  ];
+  const githubKeys: Array<keyof PlatformDeploySecretsInput> = githubAuthMode === "github_app"
+    ? [
+        "github_app_id",
+        "github_app_installation_id",
+        ...(options.githubAppPrivateKeyConfigured ? [] : ["github_app_private_key" as const])
+      ]
+    : ["github_token"];
+  const missing = [...commonKeys, ...githubKeys]
+    .map((key) => [key, input[key]] as const)
     .filter(([, value]) => !value.trim())
     .map(([key]) => key);
   if (missing.length) {
@@ -448,6 +485,24 @@ function platformDeploySecretsOutput(
   serviceData: JsonRecord,
   githubData: JsonRecord,
 ): PlatformDeploySecretsInput {
+  const githubToken = asString(
+    githubData.token,
+    asString(githubData.github_token, asString(serviceData.github_token, asString(serviceData["github-token"]))),
+  );
+  const githubAppId = asString(githubData.app_id, asString(githubData.github_app_id, asString(githubData["github-app-id"])));
+  const githubAppInstallationId = asString(
+    githubData.installation_id,
+    asString(githubData.github_app_installation_id, asString(githubData["github-app-installation-id"])),
+  );
+  const hasGitHubAppConfig = Boolean(
+    githubAppId
+    || githubAppInstallationId
+    || hasConfiguredGitHubAppPrivateKey(githubData)
+  );
+  const inferredAuthMode = githubSourceAuthMode(
+    asString(githubData.github_auth_mode, asString(githubData.auth_mode)),
+    githubToken || !hasGitHubAppConfig ? "token" : "github_app",
+  );
   return {
     tfe_token: asString(serviceData.tfe_token, asString(serviceData["tfe-token"], asString(serviceData.tf_api_token))),
     tfe_agent_pool_id: asString(serviceData.tfe_agent_pool_id, asString(serviceData["tfe-agent-pool-id"])),
@@ -458,11 +513,20 @@ function platformDeploySecretsOutput(
     cloudflare_token: asString(serviceData.cloudflare_token, asString(serviceData["cloudflare-token"])),
     cloudflare_account_id: asString(serviceData.cloudflare_account_id, asString(serviceData["cloudflare-account-id"])),
     cloudflare_zone_id: asString(serviceData.cloudflare_zone_id, asString(serviceData["cloudflare-zone-id"])),
-    github_token: asString(
-      githubData.token,
-      asString(githubData.github_token, asString(serviceData.github_token, asString(serviceData["github-token"]))),
-    )
+    github_auth_mode: inferredAuthMode,
+    github_token: githubToken,
+    github_app_id: githubAppId,
+    github_app_installation_id: githubAppInstallationId,
+    github_app_private_key: ""
   };
+}
+
+function hasConfiguredGitHubAppPrivateKey(githubData: JsonRecord): boolean {
+  return Boolean(
+    asString(githubData.private_key)
+    || asString(githubData.github_app_private_key)
+    || asString(githubData["github-app-private-key"])
+  );
 }
 
 function configuredPlatformDeploySecretKeys(values: PlatformDeploySecretsInput): string[] {
@@ -2030,7 +2094,7 @@ const openApiSpec = {
           "cloudflare_token",
           "cloudflare_account_id",
           "cloudflare_zone_id",
-          "github_token"
+          "github_auth_mode"
         ],
         additionalProperties: false,
         properties: {
@@ -2040,7 +2104,11 @@ const openApiSpec = {
           cloudflare_token: { type: "string", minLength: 1 },
           cloudflare_account_id: { type: "string", minLength: 1 },
           cloudflare_zone_id: { type: "string", minLength: 1 },
-          github_token: { type: "string", minLength: 1 }
+          github_auth_mode: { type: "string", enum: ["token", "github_app"] },
+          github_token: { type: "string" },
+          github_app_id: { type: "string" },
+          github_app_installation_id: { type: "string" },
+          github_app_private_key: { type: "string" }
         }
       },
       GetPlatformDeploySecretsResponse: {
@@ -2056,7 +2124,11 @@ const openApiSpec = {
           "cloudflare_token",
           "cloudflare_account_id",
           "cloudflare_zone_id",
-          "github_token"
+          "github_auth_mode",
+          "github_token",
+          "github_app_id",
+          "github_app_installation_id",
+          "github_app_private_key"
         ],
         additionalProperties: false,
         properties: {
@@ -2073,7 +2145,14 @@ const openApiSpec = {
           cloudflare_token: { type: "string" },
           cloudflare_account_id: { type: "string" },
           cloudflare_zone_id: { type: "string" },
-          github_token: { type: "string" }
+          github_auth_mode: { type: "string", enum: ["token", "github_app"] },
+          github_token: { type: "string" },
+          github_app_id: { type: "string" },
+          github_app_installation_id: { type: "string" },
+          github_app_private_key: {
+            type: "string",
+            description: "Always blank in read responses; use configured_keys to see whether this secret exists."
+          }
         }
       },
       SavePlatformDeploySecretsResponse: {
@@ -2379,12 +2458,16 @@ app.get("/internal/secrets/platform-deploy", async (req, res, next) => {
       vaultKv2Data("secret/data/platform-deploy-service/github")
     ]);
     const values = platformDeploySecretsOutput(serviceData, githubData);
+    const configuredKeys = configuredPlatformDeploySecretKeys(values);
+    if (hasConfiguredGitHubAppPrivateKey(githubData) && !configuredKeys.includes("github_app_private_key")) {
+      configuredKeys.push("github_app_private_key");
+    }
     const valuesReturned = asBoolean(env.RETURN_PLATFORM_DEPLOY_SECRET_VALUES, true);
     res.status(200).json({
       ok: true,
       values_returned: valuesReturned,
       values_redacted: !valuesReturned,
-      configured_keys: configuredPlatformDeploySecretKeys(values),
+      configured_keys: configuredKeys,
       ...(valuesReturned ? values : emptyPlatformDeploySecrets())
     });
   } catch (error) {
@@ -2396,7 +2479,14 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
   try {
     await enforceInternalAuth(req);
     const body = unwrapActionBody(req.body);
-    const input = platformDeploySecretsInput(body);
+    const existingGithubData = await vaultKv2Data("secret/data/platform-deploy-service/github");
+    const input = platformDeploySecretsInput(body, {
+      githubAppPrivateKeyConfigured: hasConfiguredGitHubAppPrivateKey(existingGithubData)
+    });
+    const githubAppPrivateKey = input.github_app_private_key || asString(
+      existingGithubData.private_key,
+      asString(existingGithubData.github_app_private_key, asString(existingGithubData["github-app-private-key"])),
+    );
     await writeVaultKv2Data("secret/data/platform-deploy-service", {
       tfe_token: input.tfe_token,
       tfe_agent_pool_id: input.tfe_agent_pool_id,
@@ -2404,11 +2494,20 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
       cloudflare_token: input.cloudflare_token,
       cloudflare_account_id: input.cloudflare_account_id,
       cloudflare_zone_id: input.cloudflare_zone_id,
+      github_auth_mode: input.github_auth_mode,
       github_token: input.github_token
     }, ["app_auth_gateway_admin_token", "app-auth-gateway-admin-token"]);
     await writeVaultKv2Data("secret/data/platform-deploy-service/github", {
+      auth_mode: input.github_auth_mode,
+      github_auth_mode: input.github_auth_mode,
       token: input.github_token,
-      github_token: input.github_token
+      github_token: input.github_token,
+      app_id: input.github_app_id,
+      github_app_id: input.github_app_id,
+      installation_id: input.github_app_installation_id,
+      github_app_installation_id: input.github_app_installation_id,
+      private_key: input.github_auth_mode === "github_app" ? githubAppPrivateKey : "",
+      github_app_private_key: input.github_auth_mode === "github_app" ? githubAppPrivateKey : ""
     });
     res.status(200).json({
       ok: true,
@@ -2423,7 +2522,11 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
         "cloudflare_token",
         "cloudflare_account_id",
         "cloudflare_zone_id",
-        "github_token"
+        "github_auth_mode",
+        "github_token",
+        "github_app_id",
+        "github_app_installation_id",
+        "github_app_private_key"
       ],
       saved_keys_by_path: {
         "secret/data/platform-deploy-service": [
@@ -2433,11 +2536,20 @@ app.post("/internal/secrets/platform-deploy", async (req, res, next) => {
           "cloudflare_token",
           "cloudflare_account_id",
           "cloudflare_zone_id",
+          "github_auth_mode",
           "github_token"
         ],
         "secret/data/platform-deploy-service/github": [
+          "auth_mode",
+          "github_auth_mode",
           "token",
-          "github_token"
+          "github_token",
+          "app_id",
+          "github_app_id",
+          "installation_id",
+          "github_app_installation_id",
+          "private_key",
+          "github_app_private_key"
         ]
       }
     });
