@@ -50,10 +50,13 @@ Management UI can read the same rows through the Directus/Hasura
 
 When the UI supplies `notification_context`, `platform-deploy-service` preserves
 that context on the operation payload and emits a notification request after each
-step status update. Browser push is selected only when the request context has a
-registered browser subscription; otherwise the configured fallback channels
-(`email` and/or `sms`) are requested. Notification failures are logged but do not
-fail or block the deployment operation.
+step status update. Deployment operation notifications are browser-push-only
+until user notification preferences exist. If the context includes a browser
+subscription id, user id, or user email, the notification service is asked to
+resolve a browser push target. If no browser push target can be resolved, the
+notification is skipped/logged instead of falling back to email or SMS.
+Notification failures are logged but do not fail or block the deployment
+operation.
 
 ## Validation
 

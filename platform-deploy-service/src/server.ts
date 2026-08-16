@@ -888,11 +888,15 @@ function notificationContextForStep(operation: PlatformOperation, resultJson: Js
 
 function notificationChannelsForContext(context: JsonRecord): NotificationChannel[] {
   const browserPush = asRecord(context.browser_push) ?? {};
-  if (asBoolean(browserPush.available, false) && asString(browserPush.subscription_id)) {
+  const user = asRecord(context.user) ?? {};
+  if (
+    asString(browserPush.subscription_id) ||
+    asString(user.user_id) ||
+    asString(user.email)
+  ) {
     return ["browser_push"];
   }
-  const fallbackChannels = notificationChannels(context.fallback_channels);
-  return fallbackChannels.length ? fallbackChannels : ["email", "sms"];
+  return [];
 }
 
 function notificationRecipientsForContext(context: JsonRecord, channels: NotificationChannel[]): JsonRecord[] {
@@ -914,36 +918,39 @@ function notificationRecipientsForContext(context: JsonRecord, channels: Notific
         }
       });
     }
+    const userId = asString(user.user_id);
+    const email = asString(user.email);
+    if (!recipients.length && userId) {
+      recipients.push({
+        type: "user",
+        id: userId,
+        display_name: asString(user.display_name) || undefined,
+        channels: ["browser_push"],
+        data: {
+          user_id: userId,
+          user_email: email || undefined,
+          notification_context_id: asString(context.context_id) || null,
+          notification_thread_id: asString(context.thread_id) || null
+        }
+      });
+    }
+    if (!recipients.length && email) {
+      recipients.push({
+        type: "email",
+        address: email,
+        display_name: asString(user.display_name) || undefined,
+        channels: ["browser_push"],
+        data: {
+          user_email: email,
+          notification_context_id: asString(context.context_id) || null,
+          notification_thread_id: asString(context.thread_id) || null
+        }
+      });
+    }
     return recipients;
   }
 
-  const email = asString(user.email);
-  const phone = asString(user.phone);
-  if (channels.includes("email") && email) {
-    recipients.push({
-      type: "email",
-      address: email,
-      display_name: asString(user.display_name) || undefined,
-      channels: ["email"]
-    });
-  }
-  if (channels.includes("sms") && phone) {
-    recipients.push({
-      type: "phone",
-      address: phone,
-      display_name: asString(user.display_name) || undefined,
-      channels: ["sms"]
-    });
-  }
-  if (!recipients.length && asString(user.user_id)) {
-    recipients.push({
-      type: "user",
-      id: asString(user.user_id),
-      display_name: asString(user.display_name) || undefined,
-      channels
-    });
-  }
-  return recipients;
+  return [];
 }
 
 function notificationSeverityForStep(status: OperationStepStatus): string {
@@ -983,6 +990,9 @@ async function emitPlatformOperationStepNotification(
   const browserPush = asRecord(context.browser_push) ?? {};
   const fallbackChannels = notificationChannels(context.fallback_channels);
   const recipients = notificationRecipientsForContext(context, channels);
+  if (!channels.length || !recipients.length) {
+    return;
+  }
   const user = asRecord(context.user) ?? {};
   const errorMessage = asString(event.error_message) || null;
   const redactedResultJson = redactJsonRecord(resultJson);
