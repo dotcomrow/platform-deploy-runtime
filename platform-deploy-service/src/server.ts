@@ -1126,28 +1126,17 @@ function operationStepId(operationId: string, stepKey: string): string {
 }
 
 async function getOperationStep(operationId: string, stepKey: string): Promise<PlatformOperationStep | null> {
-  const deterministicStepId = operationStepId(operationId, stepKey);
-  const [directResult, filteredResult] = await Promise.allSettled([
-    directusJson<DirectusItemResponse<PlatformOperationStep>>(
-      `/items/platform_app_operation_steps/${encodeURIComponent(deterministicStepId)}${queryString({ fields: OPERATION_STEP_FIELDS, _cb: randomUUID() })}`
-    ),
-    directusJson<DirectusListResponse<PlatformOperationStep>>(
-      `/items/platform_app_operation_steps${queryString({
-        fields: OPERATION_STEP_FIELDS,
-        "filter[operation_id][_eq]": operationId,
-        "filter[step_key][_eq]": stepKey,
-        sort: "-date_updated,-finished_at,-date_created",
-        limit: 1,
-        _cb: randomUUID()
-      })}`
-    )
-  ]);
-  const directStep = directResult.status === "fulfilled" ? directResult.value.data ?? null : null;
-  const filteredStep = filteredResult.status === "fulfilled" ? filteredResult.value.data?.[0] ?? null : null;
-  if (!directStep && !filteredStep && directResult.status === "rejected" && filteredResult.status === "rejected") {
-    throw directResult.reason;
-  }
-  return newestStatusRecord(directStep, filteredStep);
+  const filteredResult = await directusJson<DirectusListResponse<PlatformOperationStep>>(
+    `/items/platform_app_operation_steps${queryString({
+      fields: OPERATION_STEP_FIELDS,
+      "filter[operation_id][_eq]": operationId,
+      "filter[step_key][_eq]": stepKey,
+      sort: "-date_updated,-finished_at,-date_created",
+      limit: 1,
+      _cb: randomUUID()
+    })}`
+  );
+  return filteredResult.data?.[0] ?? null;
 }
 
 async function listOperationSteps(operationId: string): Promise<PlatformOperationStep[]> {
