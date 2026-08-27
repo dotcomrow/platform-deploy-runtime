@@ -1100,13 +1100,6 @@ spec:
         - name: vault-agent
           image: hashicorp/vault:1.15.4
           command: ["vault", "agent", "-config=/vault-config/vault-agent.hcl"]
-          resources:
-            requests:
-              cpu: 5m
-              memory: 24Mi
-            limits:
-              cpu: 50m
-              memory: 96Mi
           volumeMounts:
             - name: vault-agent-config
               mountPath: /vault-config
@@ -1184,13 +1177,6 @@ spec:
               value: "15000"
             - name: RATE_MAX
               value: "60"
-          resources:
-            requests:
-              cpu: 25m
-              memory: 128Mi
-            limits:
-              cpu: 300m
-              memory: 384Mi
           startupProbe:
             httpGet:
               path: /healthz
