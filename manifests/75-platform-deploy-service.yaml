@@ -1102,11 +1102,11 @@ spec:
           command: ["vault", "agent", "-config=/vault-config/vault-agent.hcl"]
           resources:
             requests:
-              cpu: 5m
-              memory: 24Mi
-            limits:
               cpu: 50m
-              memory: 96Mi
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
           volumeMounts:
             - name: vault-agent-config
               mountPath: /vault-config
