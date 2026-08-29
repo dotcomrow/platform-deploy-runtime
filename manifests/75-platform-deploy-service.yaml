@@ -288,20 +288,6 @@ spec:
             - name: vault-root-token
               mountPath: /vault-token
               readOnly: true
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: platform-deploy-state
-  namespace: directus
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 2Gi
-  storageClassName: longhorn
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
