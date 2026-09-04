@@ -47,6 +47,14 @@ const envSchema = z.object({
   TERRAFORM_RUN_RETRY_ATTEMPTS: z.string().default("3"),
   TERRAFORM_RUN_RETRY_DELAY_SECONDS: z.string().default("60"),
   DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION: z.string().default("0.3.1"),
+  DEFAULT_OPENOBSERVE_SOURCEMAPS_ENABLED: z.string().default("true"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_URL: z.string().default("http://openobserve-router.openobserve.svc.cluster.local:5080"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_ORG: z.string().default("default"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME: z.string().default("Basic"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_LOOKUP_FROM_VAULT: z.string().default("true"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT: z.string().default("secret"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME: z.string().default("openobserve-sourcemap-upload-auth-token"),
+  DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD: z.string().default("value"),
   DEFAULT_ORG_NAME: z.string().default("suncoast-systems")
 });
 
@@ -1523,6 +1531,94 @@ function openObserveBrowserRumVersion(app: PlatformApp): string {
     || env.DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION;
 }
 
+function openObserveSourceMapsEnabled(app: PlatformApp): boolean {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asBoolean(
+    github.openObserveSourceMapsEnabled
+      ?? github.openobserve_sourcemaps_enabled
+      ?? settings.openObserveSourceMapsEnabled
+      ?? settings.openobserve_sourcemaps_enabled,
+    asBoolean(env.DEFAULT_OPENOBSERVE_SOURCEMAPS_ENABLED, true)
+  );
+}
+
+function openObserveSourceMapUploadUrl(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.openObserveSourceMapUploadUrl)
+    || asString(github.openobserve_sourcemap_upload_url)
+    || asString(settings.openObserveSourceMapUploadUrl)
+    || asString(settings.openobserve_sourcemap_upload_url)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_URL;
+}
+
+function openObserveOrganizationIdentifier(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.appLogOpenObserveOrganizationIdentifier)
+    || asString(github.app_log_openobserve_organization_identifier)
+    || asString(github.openObserveOrganizationIdentifier)
+    || asString(github.openobserve_organization_identifier)
+    || asString(settings.appLogOpenObserveOrganizationIdentifier)
+    || asString(settings.app_log_openobserve_organization_identifier)
+    || asString(settings.openObserveOrganizationIdentifier)
+    || asString(settings.openobserve_organization_identifier)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_ORG;
+}
+
+function openObserveSourceMapUploadAuthScheme(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.openObserveSourceMapUploadAuthScheme)
+    || asString(github.openobserve_sourcemap_upload_auth_scheme)
+    || asString(settings.openObserveSourceMapUploadAuthScheme)
+    || asString(settings.openobserve_sourcemap_upload_auth_scheme)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME;
+}
+
+function openObserveSourceMapUploadAuthTokenLookupFromVault(app: PlatformApp): boolean {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asBoolean(
+    github.openObserveSourceMapUploadAuthTokenLookupFromVault
+      ?? github.openobserve_sourcemap_upload_auth_token_lookup_from_vault
+      ?? settings.openObserveSourceMapUploadAuthTokenLookupFromVault
+      ?? settings.openobserve_sourcemap_upload_auth_token_lookup_from_vault,
+    asBoolean(env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_LOOKUP_FROM_VAULT, true)
+  );
+}
+
+function openObserveSourceMapUploadAuthTokenVaultMount(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.openObserveSourceMapUploadAuthTokenVaultMount)
+    || asString(github.openobserve_sourcemap_upload_auth_token_vault_mount)
+    || asString(settings.openObserveSourceMapUploadAuthTokenVaultMount)
+    || asString(settings.openobserve_sourcemap_upload_auth_token_vault_mount)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT;
+}
+
+function openObserveSourceMapUploadAuthTokenVaultName(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.openObserveSourceMapUploadAuthTokenVaultName)
+    || asString(github.openobserve_sourcemap_upload_auth_token_vault_name)
+    || asString(settings.openObserveSourceMapUploadAuthTokenVaultName)
+    || asString(settings.openobserve_sourcemap_upload_auth_token_vault_name)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME;
+}
+
+function openObserveSourceMapUploadAuthTokenVaultField(app: PlatformApp): string {
+  const settings = deploymentSettings(app);
+  const github = githubSettings(app);
+  return asString(github.openObserveSourceMapUploadAuthTokenVaultField)
+    || asString(github.openobserve_sourcemap_upload_auth_token_vault_field)
+    || asString(settings.openObserveSourceMapUploadAuthTokenVaultField)
+    || asString(settings.openobserve_sourcemap_upload_auth_token_vault_field)
+    || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD;
+}
+
 function githubRepositoryVariables(app: PlatformApp): JsonRecord {
   const configuredVariables =
     asRecord(githubSettings(app).variables)
@@ -1548,6 +1644,27 @@ function githubRepositoryVariables(app: PlatformApp): JsonRecord {
   }
   if (!asString(variables.OPENOBSERVE_BROWSER_RUM_VERSION)) {
     variables.OPENOBSERVE_BROWSER_RUM_VERSION = openObserveBrowserRumVersion(app);
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAPS_ENABLED)) {
+    variables.OPENOBSERVE_SOURCEMAPS_ENABLED = String(openObserveSourceMapsEnabled(app));
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAP_UPLOAD_URL)) {
+    variables.OPENOBSERVE_SOURCEMAP_UPLOAD_URL = openObserveSourceMapUploadUrl(app);
+  }
+  if (!asString(variables.APP_LOG_OPENOBSERVE_ORGANIZATION_IDENTIFIER)) {
+    variables.APP_LOG_OPENOBSERVE_ORGANIZATION_IDENTIFIER = openObserveOrganizationIdentifier(app);
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME)) {
+    variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME = openObserveSourceMapUploadAuthScheme(app);
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT)) {
+    variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT = openObserveSourceMapUploadAuthTokenVaultMount(app);
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME)) {
+    variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME = openObserveSourceMapUploadAuthTokenVaultName(app);
+  }
+  if (!asString(variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD)) {
+    variables.OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD = openObserveSourceMapUploadAuthTokenVaultField(app);
   }
 
   return Object.fromEntries(Object.entries(variables).filter(([, value]) => asString(value) !== ""));
@@ -1614,6 +1731,14 @@ function buildRunnerInput(
     terraform_run_retry_attempts: TERRAFORM_RUN_RETRY_ATTEMPTS,
     terraform_run_retry_delay_seconds: TERRAFORM_RUN_RETRY_DELAY_SECONDS,
     openobserve_browser_rum_version: openObserveBrowserRumVersion(app),
+    openobserve_sourcemaps_enabled: openObserveSourceMapsEnabled(app),
+    openobserve_sourcemap_upload_url: openObserveSourceMapUploadUrl(app),
+    openobserve_sourcemap_upload_auth_scheme: openObserveSourceMapUploadAuthScheme(app),
+    openobserve_sourcemap_upload_auth_token_lookup_from_vault: openObserveSourceMapUploadAuthTokenLookupFromVault(app),
+    openobserve_sourcemap_upload_auth_token_vault_mount: openObserveSourceMapUploadAuthTokenVaultMount(app),
+    openobserve_sourcemap_upload_auth_token_vault_name: openObserveSourceMapUploadAuthTokenVaultName(app),
+    openobserve_sourcemap_upload_auth_token_vault_field: openObserveSourceMapUploadAuthTokenVaultField(app),
+    app_log_openobserve_organization_identifier: openObserveOrganizationIdentifier(app),
     github_repository_variables: githubRepositoryVariables(app),
     ...(Object.keys(notificationContext).length ? { notification_context: notificationContext } : {})
   };

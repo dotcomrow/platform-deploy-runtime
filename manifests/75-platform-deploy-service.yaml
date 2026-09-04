@@ -602,10 +602,32 @@ data:
       export RELEASE_VERSION
     }
 
+    bool_enabled() {
+      case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | xargs)" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    has_package_script() {
+      script_name="$1"
+      node -e "const p=require('./package.json'); process.exit(p.scripts && typeof p.scripts[process.argv[1]] === 'string' ? 0 : 1)" "${script_name}" >/dev/null 2>&1
+    }
+
     build_app_artifacts() {
       cd "${SOURCE_DIR}"
       echo "[runner] Installing app dependencies." | tee -a /tmp/platform-deploy.log
       npm ci >>/tmp/platform-deploy.log 2>&1
+
+      if bool_enabled "${OPENOBSERVE_SOURCEMAPS_ENABLED:-true}" && has_package_script "openobserve:sourcemaps:stage"; then
+        OPENOBSERVE_SOURCEMAPS_ENABLED="true"
+      else
+        if bool_enabled "${OPENOBSERVE_SOURCEMAPS_ENABLED:-true}"; then
+          echo "[runner] OpenObserve source-map upload was requested, but package.json has no openobserve:sourcemaps:stage script; continuing without source-map upload." | tee -a /tmp/platform-deploy.log
+        fi
+        OPENOBSERVE_SOURCEMAPS_ENABLED="false"
+      fi
+      export OPENOBSERVE_SOURCEMAPS_ENABLED
 
       VERSION="${OPENOBSERVE_BROWSER_RUM_VERSION:-0.3.1}"
       DEST_DIR="public/openobserve"
@@ -626,12 +648,21 @@ data:
       cp "/tmp/openobserve-browser-rum/package/bundle/openobserve-rum.js" "${DEST_FILE}"
 
       echo "[runner] Building OpenNext worker artifacts." | tee -a /tmp/platform-deploy.log
-      npm run cf:build >>/tmp/platform-deploy.log 2>&1
+      OPENOBSERVE_SOURCEMAPS_ENABLED="${OPENOBSERVE_SOURCEMAPS_ENABLED}" npm run cf:build >>/tmp/platform-deploy.log 2>&1
       rm -rf terraform/.open-next
       mkdir -p terraform/.open-next
-      WRANGLER_LOG=error npx wrangler deploy --dry-run --outdir terraform/.open-next --config wrangler.jsonc --env production >>/tmp/platform-deploy.log 2>&1
+      OPENOBSERVE_SOURCEMAPS_ENABLED="${OPENOBSERVE_SOURCEMAPS_ENABLED}" WRANGLER_LOG=error npx wrangler deploy --dry-run --outdir terraform/.open-next --config wrangler.jsonc --env production >>/tmp/platform-deploy.log 2>&1
       rm -rf terraform/.open-next/assets
       cp -R .open-next/assets terraform/.open-next/assets
+
+      OPENOBSERVE_SOURCEMAPS_STAGED="false"
+      if [ "${OPENOBSERVE_SOURCEMAPS_ENABLED}" = "true" ]; then
+        npm run openobserve:sourcemaps:stage >>/tmp/platform-deploy.log 2>&1
+        [ -f terraform/.open-next/sourcemaps/sourcemaps.zip ] \
+          || fail "OpenObserve source-map staging did not create terraform/.open-next/sourcemaps/sourcemaps.zip."
+        OPENOBSERVE_SOURCEMAPS_STAGED="true"
+      fi
+      export OPENOBSERVE_SOURCEMAPS_STAGED
     }
 
     tfe_lookup_project_id() {
@@ -775,6 +806,18 @@ data:
         tfe_upsert_var "${workspace_id}" "app_build_commit" "${APP_BUILD_COMMIT}" "application build commit"
         tfe_upsert_var "${workspace_id}" "app_build_timestamp" "${APP_BUILD_TIMESTAMP}" "application build timestamp"
       fi
+      sourcemap_upload_enabled="false"
+      if [ "${include_build}" = "true" ]; then
+        sourcemap_upload_enabled="${OPENOBSERVE_SOURCEMAPS_STAGED:-false}"
+      fi
+      tfe_upsert_var "${workspace_id}" "app_log_openobserve_organization_identifier" "${APP_LOG_OPENOBSERVE_ORGANIZATION_IDENTIFIER:-${OPENOBSERVE_SOURCEMAP_ORG:-default}}" "OpenObserve organization identifier"
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_enabled" "${sourcemap_upload_enabled}" "upload staged OpenObserve source maps" true
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_url" "${OPENOBSERVE_SOURCEMAP_UPLOAD_URL:-http://openobserve-router.openobserve.svc.cluster.local:5080}" "OpenObserve source-map upload API base URL"
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_auth_scheme" "${OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME:-Basic}" "OpenObserve source-map upload auth scheme"
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_auth_token_lookup_from_vault" "${OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_LOOKUP_FROM_VAULT:-true}" "resolve OpenObserve source-map upload auth from Vault" true
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_auth_token_vault_mount" "${OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT:-secret}" "OpenObserve source-map auth Vault mount"
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_auth_token_vault_name" "${OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME:-openobserve-sourcemap-upload-auth-token}" "OpenObserve source-map auth Vault secret name"
+      tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_auth_token_vault_field" "${OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD:-value}" "OpenObserve source-map auth Vault field"
     }
 
     tfe_upload_configuration() {
@@ -1167,6 +1210,22 @@ spec:
               value: "60"
             - name: DEFAULT_OPENOBSERVE_BROWSER_RUM_VERSION
               value: "0.3.1"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAPS_ENABLED
+              value: "true"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_URL
+              value: "http://openobserve-router.openobserve.svc.cluster.local:5080"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_ORG
+              value: "default"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_SCHEME
+              value: "Basic"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_LOOKUP_FROM_VAULT
+              value: "true"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_MOUNT
+              value: "secret"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_NAME
+              value: "openobserve-sourcemap-upload-auth-token"
+            - name: DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD
+              value: "value"
             - name: REQUEST_TIMEOUT_MS
               value: "15000"
             - name: RATE_MAX
