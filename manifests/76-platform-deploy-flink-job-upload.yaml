@@ -58,3 +58,80 @@ spec:
             limits:
               cpu: 300m
               memory: 512Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: platform-deploy-flink-job-upload-reconciler
+  namespace: directus
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app: platform-deploy-flink-job-upload-reconciler
+          annotations:
+            linkerd.io/inject: "disabled"
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: upload
+              image: ghcr.io/dotcomrow/platform-deploy-flink-job:latest
+              imagePullPolicy: Always
+              env:
+                - name: FLINK_REST_URL
+                  value: "http://flink-rest.kafka.svc.cluster.local:8081"
+                - name: FLINK_JAR_NAME
+                  value: "platform-deploy-flink-job.jar"
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  FLINK_REST_URL="${FLINK_REST_URL%/}"
+
+                  jar_present() {
+                    jars="$(curl -fsS "${FLINK_REST_URL}/jars" 2>/dev/null)" || return 1
+                    printf '%s' "${jars}" | grep -Fq "\"name\":\"${FLINK_JAR_NAME}\""
+                  }
+
+                  echo "Reconciling ${FLINK_JAR_NAME} in Flink at ${FLINK_REST_URL}..."
+                  ready="false"
+                  for _ in $(seq 1 60); do
+                    if curl -fsS "${FLINK_REST_URL}/overview" >/dev/null; then
+                      ready="true"
+                      break
+                    fi
+                    sleep 2
+                  done
+                  if [ "${ready}" != "true" ]; then
+                    echo "Flink REST did not become ready."
+                    exit 1
+                  fi
+
+                  if jar_present; then
+                    echo "${FLINK_JAR_NAME} is already uploaded."
+                    exit 0
+                  fi
+
+                  echo "Uploading ${FLINK_JAR_NAME}..."
+                  curl -fsS -X POST \
+                    -H "Expect:" \
+                    -F "jarfile=@/opt/flink/usrlib/${FLINK_JAR_NAME}" \
+                    "${FLINK_REST_URL}/jars/upload"
+                  echo
+                  echo "${FLINK_JAR_NAME} uploaded."
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 128Mi
+                limits:
+                  cpu: 300m
+                  memory: 512Mi
