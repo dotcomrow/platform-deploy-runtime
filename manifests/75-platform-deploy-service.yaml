@@ -807,8 +807,8 @@ data:
         tfe_upsert_var "${workspace_id}" "app_build_timestamp" "${APP_BUILD_TIMESTAMP}" "application build timestamp"
       fi
       sourcemap_upload_enabled="false"
-      if [ "${include_build}" = "true" ]; then
-        sourcemap_upload_enabled="${OPENOBSERVE_SOURCEMAPS_STAGED:-false}"
+      if [ "${include_build}" = "true" ] && [ "${OPENOBSERVE_SOURCEMAPS_STAGED:-false}" = "true" ]; then
+        echo "[runner] OpenObserve source maps were staged; Terraform Cloud source-map upload is disabled because OpenObserve is reachable only from inside Kubernetes." | tee -a /tmp/platform-deploy.log
       fi
       tfe_upsert_var "${workspace_id}" "app_log_openobserve_organization_identifier" "${APP_LOG_OPENOBSERVE_ORGANIZATION_IDENTIFIER:-${OPENOBSERVE_SOURCEMAP_ORG:-default}}" "OpenObserve organization identifier"
       tfe_upsert_var "${workspace_id}" "openobserve_sourcemap_upload_enabled" "${sourcemap_upload_enabled}" "upload staged OpenObserve source maps" true
