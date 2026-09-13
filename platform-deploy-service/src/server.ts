@@ -87,6 +87,7 @@ type JsonRecord = Record<string, unknown>;
 type OperationType = "create" | "update" | "redeploy" | "delete" | "destroy";
 type OperationStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 type OperationStepStatus = OperationStatus;
+type TerminalOperationStatus = "succeeded" | "failed" | "canceled";
 type DeploymentStatus = "not_deployed" | "queued" | "deploying" | "deployed" | "failed" | "destroying" | "destroyed";
 type DeploymentStrategy = "terraform_cloud" | "local_terraform";
 type GitHubSourceAuthMode = "token" | "github_app";
@@ -1096,6 +1097,18 @@ function statusTerminal(status: unknown): boolean {
   return normalized === "succeeded" || normalized === "failed" || normalized === "canceled";
 }
 
+function terminalStatusFromFinishCallback(operation: PlatformOperation, body: JsonRecord): TerminalOperationStatus {
+  if (statusTerminal(operation.status)) {
+    return operation.status as TerminalOperationStatus;
+  }
+
+  const normalized = asString(body.status).toLowerCase();
+  if (normalized === "succeeded" || normalized === "canceled") {
+    return normalized;
+  }
+  return "failed";
+}
+
 function newestStatusRecord<T extends {
   status?: string | null;
   date_updated?: string | null;
@@ -1286,10 +1299,6 @@ async function upsertOperationStep(
     });
     await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
   } catch (error) {
-    if (!isDirectusOperationStepUniqueError(error)) {
-      throw error;
-    }
-
     if (await updateDeterministicStep()) {
       await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
       return;
@@ -1309,8 +1318,75 @@ async function upsertOperationStep(
         return;
       }
     }
+    if (!isDirectusOperationStepUniqueError(error)) {
+      throw error;
+    }
     throw error;
   }
+}
+
+async function applyFinishCallback(operation: PlatformOperation, body: JsonRecord): Promise<JsonRecord> {
+  const appId = asString(body.app_id) || appIdFromOperation(operation);
+  const operationType = operationTypeFromBody(body, operation.operation_type);
+  const terminalStatus = terminalStatusFromFinishCallback(operation, body);
+  const succeeded = terminalStatus === "succeeded";
+  const deploymentStatus: DeploymentStatus = succeeded
+    ? operationSequence(operationType) === "destroy" ? "destroyed" : "deployed"
+    : "failed";
+  const finishedAt = asString(operation.finished_at) || new Date().toISOString();
+  const errorMessage = asString(body.error_message);
+  const bodyResultJson = asRecord(body.result_json) ?? {};
+  const operationResultJson = {
+    ...(asRecord(operation.result_json) ?? {}),
+    ...bodyResultJson
+  };
+  const stepResultJson = Object.keys(bodyResultJson).length ? bodyResultJson : operationResultJson;
+
+  await upsertOperationStep(operation, "finish", {
+    status: terminalStatus,
+    app_id: appId,
+    message: succeeded ? "Deployment orchestration finished successfully." : "Deployment orchestration failed.",
+    result_json: stepResultJson,
+    error_message: succeeded ? null : errorMessage || "Deployment failed.",
+    log_excerpt: asString(body.log_excerpt) || null,
+    finished_at: finishedAt
+  });
+  await upsertOperationStep(operation, "orchestration", {
+    status: terminalStatus,
+    app_id: appId,
+    message: succeeded ? "NiFi deployment orchestration completed." : "NiFi deployment orchestration failed before completion.",
+    result_json: stepResultJson,
+    error_message: succeeded ? null : errorMessage || "Deployment failed.",
+    log_excerpt: asString(body.log_excerpt) || null,
+    finished_at: finishedAt
+  });
+  if (appId) {
+    await updateApp(appId, {
+      deployment_status: deploymentStatus,
+      last_deployed_at: succeeded && deploymentStatus === "deployed" ? finishedAt : undefined,
+      last_error: succeeded ? null : errorMessage || "Deployment failed."
+    });
+  }
+  if (operationActive(operation)) {
+    await updateOperation(operation.id, {
+      status: terminalStatus,
+      finished_at: finishedAt,
+      result_json: operationResultJson,
+      error_message: succeeded ? null : errorMessage || "Deployment failed.",
+      log_excerpt: asString(body.log_excerpt) || null,
+      terraform_run_id: asString(body.terraform_run_id) || undefined,
+      terraform_run_url: asString(body.terraform_run_url) || undefined
+    });
+  }
+
+  return {
+    app_id: appId || null,
+    operation_type: operationType,
+    status: terminalStatus,
+    active: false,
+    deployment_status: deploymentStatus,
+    finished_at: finishedAt
+  };
 }
 
 function organizationFromApp(app: PlatformApp): PlatformOrganization | null {
@@ -2801,55 +2877,14 @@ app.get("/internal/operations/:id/status", async (req, res, next) => {
 app.post("/internal/operations/:id/finish", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
-    if (!operationActive(operation)) {
-      res.status(200).json(terminalOperationIgnoredPayload(operation, "finish"));
-      return;
-    }
     const body = unwrapActionBody(req.body);
-    const appId = asString(body.app_id) || appIdFromOperation(operation);
-    const operationType = operationTypeFromBody(body, operation.operation_type);
-    const succeeded = asString(body.status) === "succeeded";
-    const deploymentStatus: DeploymentStatus = succeeded
-      ? operationSequence(operationType) === "destroy" ? "destroyed" : "deployed"
-      : "failed";
-    const errorMessage = asString(body.error_message);
-    const bodyResultJson = asRecord(body.result_json) ?? {};
-    await updateOperation(req.params.id, {
-      status: succeeded ? "succeeded" : "failed",
-      finished_at: new Date().toISOString(),
-      result_json: {
-        ...(asRecord(operation.result_json) ?? {}),
-        ...bodyResultJson
-      },
-      error_message: errorMessage || null,
-      log_excerpt: asString(body.log_excerpt) || null,
-      terraform_run_id: asString(body.terraform_run_id) || undefined,
-      terraform_run_url: asString(body.terraform_run_url) || undefined
+    const result = await applyFinishCallback(operation, body);
+    res.status(200).json({
+      ok: true,
+      operation_id: operation.id,
+      reconciled: !operationActive(operation),
+      ...result
     });
-    await upsertOperationStep(operation, "finish", {
-      status: succeeded ? "succeeded" : "failed",
-      app_id: appId,
-      message: succeeded ? "Deployment orchestration finished successfully." : "Deployment orchestration failed.",
-      result_json: bodyResultJson,
-      error_message: errorMessage || null,
-      log_excerpt: asString(body.log_excerpt) || null
-    });
-    await upsertOperationStep(operation, "orchestration", {
-      status: succeeded ? "succeeded" : "failed",
-      app_id: appId,
-      message: succeeded ? "NiFi deployment orchestration completed." : "NiFi deployment orchestration failed before completion.",
-      result_json: bodyResultJson,
-      error_message: errorMessage || null,
-      log_excerpt: asString(body.log_excerpt) || null
-    });
-    if (appId) {
-      await updateApp(appId, {
-        deployment_status: deploymentStatus,
-        last_deployed_at: succeeded && deploymentStatus === "deployed" ? new Date().toISOString() : undefined,
-        last_error: succeeded ? null : errorMessage || "Deployment failed."
-      });
-    }
-    res.status(200).json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -2859,11 +2894,16 @@ app.use((_req, res) => {
   res.status(404).json({ error: { message: "Not found", status: 404 } });
 });
 
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   const status = Math.max(400, Math.min(599, Number((err as { status?: number }).status) || 500));
+  const message = err instanceof Error ? err.message : "Internal server error";
+  console.error(`[platform-deploy-service] ${req.method} ${req.originalUrl} failed ${status}: ${truncate(redactText(message), 1200)}`);
+  if (err instanceof Error && err.stack) {
+    console.error(truncate(redactText(err.stack), 4000));
+  }
   res.status(status).json({
     error: {
-      message: err instanceof Error ? err.message : "Internal server error",
+      message,
       status
     }
   });

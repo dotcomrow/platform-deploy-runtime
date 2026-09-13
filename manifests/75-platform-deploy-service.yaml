@@ -307,18 +307,39 @@ data:
         return 0
       fi
 
-      auth_args=""
+      auth_header=""
       if [ -n "${PLATFORM_DEPLOY_SERVICE_TOKEN:-}" ]; then
-        auth_args="-H Authorization: Bearer ${PLATFORM_DEPLOY_SERVICE_TOKEN}"
+        auth_header="Authorization: Bearer ${PLATFORM_DEPLOY_SERVICE_TOKEN}"
       fi
 
-      # shellcheck disable=SC2086
-      curl -fsS --connect-timeout 10 --max-time 60 \
-        -X POST \
-        -H "Content-Type: application/json" \
-        ${auth_args} \
-        -d "${body}" \
-        "${PLATFORM_DEPLOY_CALLBACK_URL%/}${path}" >/dev/null
+      callback_out="$(mktemp)"
+      if [ -n "${auth_header}" ]; then
+        callback_code="$(curl -sS -o "${callback_out}" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -H "${auth_header}" \
+          -d "${body}" \
+          "${PLATFORM_DEPLOY_CALLBACK_URL%/}${path}" 2>>/tmp/platform-deploy.log || true)"
+      else
+        callback_code="$(curl -sS -o "${callback_out}" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -d "${body}" \
+          "${PLATFORM_DEPLOY_CALLBACK_URL%/}${path}" 2>>/tmp/platform-deploy.log || true)"
+      fi
+      case "${callback_code}" in
+        200|201|202|204)
+          rm -f "${callback_out}"
+          return 0
+          ;;
+      esac
+      echo "[runner] Callback ${path} failed (HTTP ${callback_code:-curl-error})." | tee -a /tmp/platform-deploy.log
+      if [ -s "${callback_out}" ]; then
+        cat "${callback_out}" >>/tmp/platform-deploy.log || true
+        echo "" >>/tmp/platform-deploy.log
+      fi
+      rm -f "${callback_out}"
+      return 1
     }
 
     finish() {
@@ -341,7 +362,7 @@ data:
         --arg github_release_version "${RELEASE_VERSION:-}" \
         --arg github_ref "${GITHUB_REF:-}" \
         '{app_id:$app_id,operation_type:$operation_type,status:$status,error_message:$error_message,log_excerpt:$log_excerpt,terraform_run_id:$terraform_run_id,terraform_run_url:$terraform_run_url,result_json:{runner:"platform-app-deploy-runner",github_repository:$github_repository,github_initial_workflow:$github_initial_workflow,github_release_version:$github_release_version,github_ref:$github_ref,terraform_run_id:$terraform_run_id,terraform_run_url:$terraform_run_url}}')"
-      callback "/internal/operations/${OPERATION_ID}/finish" "${body}" || true
+      callback "/internal/operations/${OPERATION_ID}/finish" "${body}"
     }
 
     fail() {
@@ -1120,7 +1141,7 @@ spec:
   template:
     metadata:
       annotations:
-        platform.suncoast.systems/restart-revision: "2026-08-01-operation-step-deterministic-id"
+        platform.suncoast.systems/restart-revision: "2026-09-13-finish-callback-reconcile"
         reloader.stakater.com/auto: "true"
       labels:
         app: platform-deploy-service
