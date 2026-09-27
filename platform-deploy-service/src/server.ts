@@ -38,6 +38,8 @@ const envSchema = z.object({
   PLATFORM_NOTIFICATION_TOKEN_VAULT_PATH: z.string().default("secret/data/platform-notification-service/clients/platform-deploy-service"),
   PLATFORM_NOTIFICATION_TOKEN_VAULT_KEY: z.string().default("token"),
   OPERATION_CALLBACK_TOKEN_TTL_SECONDS: z.string().default("21600"),
+  STALE_OPERATION_RECONCILE_INTERVAL_SECONDS: z.string().default("60"),
+  STALE_OPERATION_TIMEOUT_SECONDS: z.string().default("9000"),
   GITHUB_API_BASE: z.string().default("https://api.github.com"),
   TFE_API_BASE: z.string().default("https://app.terraform.io/api/v2"),
   DEFAULT_INITIAL_DEPLOY_WORKFLOW: z.string().default("initial-deploy.yml"),
@@ -76,6 +78,8 @@ const PLATFORM_NOTIFICATION_SERVICE_URL = env.PLATFORM_NOTIFICATION_SERVICE_URL.
 const PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY = "platform.deploy.operation-step";
 const FLINK_PARALLELISM = Math.max(1, Number(env.FLINK_PARALLELISM) || 1);
 const OPERATION_CALLBACK_TOKEN_TTL_SECONDS = Math.max(300, Number(env.OPERATION_CALLBACK_TOKEN_TTL_SECONDS) || 21_600);
+const STALE_OPERATION_RECONCILE_INTERVAL_SECONDS = Math.max(30, Number(env.STALE_OPERATION_RECONCILE_INTERVAL_SECONDS) || 60);
+const STALE_OPERATION_TIMEOUT_SECONDS = Math.max(900, Number(env.STALE_OPERATION_TIMEOUT_SECONDS) || 9_000);
 const GITHUB_API_BASE = env.GITHUB_API_BASE.replace(/\/+$/, "");
 const TFE_API_BASE = env.TFE_API_BASE.replace(/\/+$/, "");
 const TERRAFORM_RUN_TIMEOUT_SECONDS = Math.max(300, Number(env.TERRAFORM_RUN_TIMEOUT_SECONDS) || 7200);
@@ -779,6 +783,19 @@ async function getActiveOperationForApp(appId: string): Promise<PlatformOperatio
   return response.data?.find((operation) => operation.status === "queued" || operation.status === "running") ?? null;
 }
 
+async function listActiveOperations(): Promise<PlatformOperation[]> {
+  const response = await directusJson<DirectusListResponse<PlatformOperation>>(
+    `/items/platform_app_operations${queryString({
+      fields: "id,app_id,operation_type,status,result_json,error_message,requested_at,finished_at,date_created,date_updated",
+      "filter[status][_in]": "queued,running",
+      sort: "requested_at",
+      limit: 100,
+      _cb: randomUUID()
+    })}`
+  );
+  return response.data ?? [];
+}
+
 async function withAppQueueLock<T>(appId: string, callback: () => Promise<T>): Promise<T> {
   const previous = queueOperationLocks.get(appId) ?? Promise.resolve();
   let release: () => void = () => undefined;
@@ -1387,6 +1404,47 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
     deployment_status: deploymentStatus,
     finished_at: finishedAt
   };
+}
+
+let staleOperationReconcileRunning = false;
+
+async function reconcileStaleOperations(): Promise<void> {
+  if (staleOperationReconcileRunning) return;
+  staleOperationReconcileRunning = true;
+  try {
+    const now = Date.now();
+    for (const operation of await listActiveOperations()) {
+      const steps = await listOperationSteps(operation.id);
+      const timestamps = [operation.requested_at, operation.date_created, operation.date_updated]
+        .concat(steps.flatMap((step) => [step.started_at, step.finished_at, step.date_created, step.date_updated]))
+        .map((value) => Date.parse(asString(value)))
+        .filter(Number.isFinite);
+      const lastActivity = timestamps.length ? Math.max(...timestamps) : now;
+      if (now - lastActivity < STALE_OPERATION_TIMEOUT_SECONDS * 1000) continue;
+      const lastStep = [...steps].sort((left, right) => statusRecordTimestamp(right) - statusRecordTimestamp(left))[0];
+      const detail = lastStep
+        ? `Last recorded step ${lastStep.step_key} was ${lastStep.status}${lastStep.error_message ? `: ${lastStep.error_message}` : "."}`
+        : "No deployment step was recorded.";
+      const errorMessage = `Operation automatically failed after ${STALE_OPERATION_TIMEOUT_SECONDS} seconds without progress. ${detail} Review this error before starting a new operation.`;
+      console.error(`[platform-deploy-service] reconciling stale operation ${operation.id}: ${errorMessage}`);
+      await applyFinishCallback(operation, {
+        app_id: appIdFromOperation(operation),
+        status: "failed",
+        error_message: errorMessage,
+        result_json: {
+          reconciled_by: "platform-deploy-service-stale-operation-watchdog",
+          reconciled_at: new Date(now).toISOString(),
+          last_activity_at: new Date(lastActivity).toISOString(),
+          last_step: lastStep?.step_key ?? null,
+          last_step_status: lastStep?.status ?? null
+        }
+      });
+    }
+  } catch (error) {
+    console.error(`[platform-deploy-service] stale operation reconciliation failed: ${error instanceof Error ? truncate(error.message, 1200) : "unknown error"}`);
+  } finally {
+    staleOperationReconcileRunning = false;
+  }
 }
 
 function organizationFromApp(app: PlatformApp): PlatformOrganization | null {
@@ -2911,4 +2969,6 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(PORT, () => {
   console.log(`[platform-deploy-service] listening on :${PORT}`);
+  setInterval(() => void reconcileStaleOperations(), STALE_OPERATION_RECONCILE_INTERVAL_SECONDS * 1000).unref();
+  setTimeout(() => void reconcileStaleOperations(), 10_000).unref();
 });

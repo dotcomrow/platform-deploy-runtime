@@ -1213,6 +1213,10 @@ spec:
               value: "token"
             - name: OPERATION_CALLBACK_TOKEN_TTL_SECONDS
               value: "21600"
+            - name: STALE_OPERATION_RECONCILE_INTERVAL_SECONDS
+              value: "60"
+            - name: STALE_OPERATION_TIMEOUT_SECONDS
+              value: "9000"
             - name: GITHUB_API_BASE
               value: "https://api.github.com"
             - name: DEFAULT_INITIAL_DEPLOY_WORKFLOW
