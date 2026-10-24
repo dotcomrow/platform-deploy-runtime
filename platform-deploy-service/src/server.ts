@@ -931,21 +931,22 @@ function notificationRecipientsForContext(context: JsonRecord, channels: Notific
   const recipients: JsonRecord[] = [];
 
   if (channels.includes("browser_push")) {
-    const subscriptionId = asString(browserPush.subscription_id);
-    if (subscriptionId) {
+    const userId = asString(user.user_id);
+    const email = asString(user.email);
+    if (email) {
       recipients.push({
-        type: "browser_subscription",
-        id: subscriptionId,
+        type: "email",
+        address: email,
+        display_name: asString(user.display_name) || undefined,
         channels: ["browser_push"],
         data: {
-          browser_installation_id: asString(browserPush.browser_installation_id) || null,
+          user_id: userId || undefined,
+          user_email: email,
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id) || null
         }
       });
     }
-    const userId = asString(user.user_id);
-    const email = asString(user.email);
     if (!recipients.length && userId) {
       recipients.push({
         type: "user",
@@ -960,14 +961,14 @@ function notificationRecipientsForContext(context: JsonRecord, channels: Notific
         }
       });
     }
-    if (!recipients.length && email) {
+    const subscriptionId = asString(browserPush.subscription_id);
+    if (!recipients.length && subscriptionId) {
       recipients.push({
-        type: "email",
-        address: email,
-        display_name: asString(user.display_name) || undefined,
+        type: "browser_subscription",
+        id: subscriptionId,
         channels: ["browser_push"],
         data: {
-          user_email: email,
+          browser_installation_id: asString(browserPush.browser_installation_id) || null,
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id) || null
         }
@@ -1057,6 +1058,7 @@ async function emitPlatformOperationStepNotification(
         priority: notificationPriorityForStep(status),
         app_id: appId || undefined,
         actor_user_id: asString(user.user_id) || undefined,
+        browser_installation_id: asString(browserPush.browser_installation_id) || undefined,
         notification_key: PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY,
         channels,
         recipients,

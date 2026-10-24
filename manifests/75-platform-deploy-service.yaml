@@ -1174,7 +1174,7 @@ spec:
             - name: DIRECTUS_BASE_URL
               value: "http://directus-service.directus.svc.cluster.local:8055"
             - name: DIRECTUS_HEALTH_PATH
-              value: "/server/health"
+              value: "/server/ping"
             - name: DIRECTUS_TOKEN_VAULT_PATH
               value: "secret/data/directus/gravitee/clients/internal/graphql-api"
             - name: DIRECTUS_TOKEN_VAULT_KEY
