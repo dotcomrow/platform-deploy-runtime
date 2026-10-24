@@ -1862,6 +1862,7 @@ function buildRunnerInput(
     sequence,
     deployment_strategy: deploymentStrategy(app),
     app_id: app.id,
+    content_app_id: contentAppId(app),
     organization_id: organization?.id || "",
     app_key: app.app_key,
     site_key: app.site_key,
