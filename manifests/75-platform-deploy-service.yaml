@@ -533,6 +533,9 @@ data:
       DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE="$(printf '%s' "${SITE_KEY:-${REALM}}" | tr '[:upper:]' '[:lower:]' | xargs)"
       printf '%s' "${DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE}" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,62}$' \
         || fail "DIRECTUS_CONTENT_SITE_KEY must start with a letter or number and contain only letters, numbers, hyphens, or underscores."
+      DIRECTUS_CONTENT_APP_ID_EFFECTIVE="$(printf '%s' "${GITHUB_REPOSITORY_VARIABLES_JSON:-{}}" | jq -r '.DIRECTUS_CONTENT_APP_ID // empty' | xargs)"
+      printf '%s' "${DIRECTUS_CONTENT_APP_ID_EFFECTIVE}" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' \
+        || fail "DIRECTUS_CONTENT_APP_ID must be the logical cms_apps UUID supplied by the platform deploy service."
 
       APP_BASE_DOMAIN_EFFECTIVE="$(printf '%s' "${DOMAIN:-suncoast.systems}" | xargs)"
       [ -n "${APP_BASE_DOMAIN_EFFECTIVE}" ] || APP_BASE_DOMAIN_EFFECTIVE="suncoast.systems"
@@ -803,7 +806,7 @@ data:
       tfe_upsert_var "${workspace_id}" "directus_client_lookup_from_vault" "true" "resolve directus client credentials from vault" true
       tfe_upsert_var "${workspace_id}" "cache_refresh_auth_audience_lookup_from_vault" "true" "resolve refresh auth audience from vault" true
       tfe_upsert_var "${workspace_id}" "keycloak_realm" "${REALM}" "keycloak realm selector"
-      tfe_upsert_var "${workspace_id}" "directus_content_app_id" "${APP_ID}" "Directus content application id"
+      tfe_upsert_var "${workspace_id}" "directus_content_app_id" "${DIRECTUS_CONTENT_APP_ID_EFFECTIVE}" "Logical Directus CMS application id"
       tfe_upsert_var "${workspace_id}" "directus_content_site_key" "${DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE}" "Directus content site key"
       tfe_upsert_var "${workspace_id}" "directus_auth_token_url" "${DIRECTUS_AUTH_TOKEN_URL}" "directus token endpoint"
       tfe_upsert_var "${workspace_id}" "cache_refresh_auth_issuer" "${CACHE_REFRESH_AUTH_ISSUER}" "refresh token issuer"

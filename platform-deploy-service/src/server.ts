@@ -116,6 +116,7 @@ type PlatformOrganization = {
 
 type PlatformApp = {
   id: string;
+  cms_app_id?: string | { id?: string | null } | null;
   organization_id?: string | PlatformOrganization | null;
   app_key: string;
   display_name?: string | null;
@@ -637,6 +638,7 @@ async function getApp(appId: string): Promise<PlatformApp> {
     "organization_id.name",
     "organization_id.default_domain",
     "organization_id.settings_json",
+    "cms_app_id",
     "app_key",
     "display_name",
     "site_key",
@@ -1767,6 +1769,18 @@ function openObserveSourceMapUploadAuthTokenVaultField(app: PlatformApp): string
     || env.DEFAULT_OPENOBSERVE_SOURCEMAP_UPLOAD_AUTH_TOKEN_VAULT_FIELD;
 }
 
+function contentAppId(app: PlatformApp): string {
+  const relation = app.cms_app_id;
+  const id = asString(typeof relation === "object" && relation !== null ? relation.id : relation);
+  if (!id) {
+    throw Object.assign(
+      new Error(`Platform app ${app.id} must be linked to a logical cms_apps record before deployment.`),
+      { status: 409 }
+    );
+  }
+  return id;
+}
+
 function githubRepositoryVariables(app: PlatformApp): JsonRecord {
   const configuredVariables =
     asRecord(githubSettings(app).variables)
@@ -1776,7 +1790,7 @@ function githubRepositoryVariables(app: PlatformApp): JsonRecord {
   const variables: JsonRecord = {
     KEYCLOAK_REALM: app.keycloak_realm,
     TFE_PROJECT: terraformProject(app),
-    DIRECTUS_CONTENT_APP_ID: app.id,
+    DIRECTUS_CONTENT_APP_ID: contentAppId(app),
     DIRECTUS_CONTENT_SITE_KEY: app.site_key,
     KEYCLOAK_AUTH_HOST: keycloakAuthHost(app),
     APP_AUTH_GATEWAY_URL: authGatewayUrl(app),
