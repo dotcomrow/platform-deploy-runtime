@@ -1086,6 +1086,18 @@ async function emitPlatformOperationStepNotification(
   }
 }
 
+function dispatchPlatformOperationStepNotification(
+  operation: PlatformOperation,
+  stepKey: string,
+  event: JsonRecord
+): void {
+  void emitPlatformOperationStepNotification(operation, stepKey, event).catch((error) => {
+    console.warn(
+      `[platform-deploy-service] asynchronous notification dispatch failed: ${error instanceof Error ? truncate(error.message, 700) : "unknown error"}`
+    );
+  });
+}
+
 function optionalInt(value: unknown): number | undefined {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : undefined;
@@ -1303,7 +1315,7 @@ async function upsertOperationStep(
 
   if (existing?.id) {
     await updateExistingStep(existing);
-    await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+    dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
     return;
   }
 
@@ -1316,15 +1328,15 @@ async function upsertOperationStep(
         ...buildPatch(null)
       }
     });
-    await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+    dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
   } catch (error) {
     if (await updateDeterministicStep()) {
-      await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+      dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
       return;
     }
 
     if (await updateExistingStepByUniqueFilter()) {
-      await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+      dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
       return;
     }
 
@@ -1333,7 +1345,7 @@ async function upsertOperationStep(
       const racedExisting = await getOperationStep(operation.id, stepKey);
       if (racedExisting?.id) {
         await updateExistingStep(racedExisting);
-        await emitPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+        dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
         return;
       }
     }
