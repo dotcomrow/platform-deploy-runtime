@@ -1776,6 +1776,7 @@ function githubRepositoryVariables(app: PlatformApp): JsonRecord {
   const variables: JsonRecord = {
     KEYCLOAK_REALM: app.keycloak_realm,
     TFE_PROJECT: terraformProject(app),
+    DIRECTUS_CONTENT_APP_ID: app.id,
     DIRECTUS_CONTENT_SITE_KEY: app.site_key,
     KEYCLOAK_AUTH_HOST: keycloakAuthHost(app),
     APP_AUTH_GATEWAY_URL: authGatewayUrl(app),

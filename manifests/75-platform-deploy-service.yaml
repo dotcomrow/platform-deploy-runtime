@@ -803,6 +803,7 @@ data:
       tfe_upsert_var "${workspace_id}" "directus_client_lookup_from_vault" "true" "resolve directus client credentials from vault" true
       tfe_upsert_var "${workspace_id}" "cache_refresh_auth_audience_lookup_from_vault" "true" "resolve refresh auth audience from vault" true
       tfe_upsert_var "${workspace_id}" "keycloak_realm" "${REALM}" "keycloak realm selector"
+      tfe_upsert_var "${workspace_id}" "directus_content_app_id" "${APP_ID}" "Directus content application id"
       tfe_upsert_var "${workspace_id}" "directus_content_site_key" "${DIRECTUS_CONTENT_SITE_KEY_EFFECTIVE}" "Directus content site key"
       tfe_upsert_var "${workspace_id}" "directus_auth_token_url" "${DIRECTUS_AUTH_TOKEN_URL}" "directus token endpoint"
       tfe_upsert_var "${workspace_id}" "cache_refresh_auth_issuer" "${CACHE_REFRESH_AUTH_ISSUER}" "refresh token issuer"
