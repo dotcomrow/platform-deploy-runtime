@@ -927,9 +927,16 @@ function notificationChannelsForContext(context: JsonRecord): NotificationChanne
   return [];
 }
 
+function browserPushDeviceTargetForContext(context: JsonRecord): string {
+  const preferences = asRecord(context.notification_preferences) ?? {};
+  const value = asString(preferences.browser_push_device_target);
+  return value === "favorite_device" || value === "all_devices" ? value : "current_device";
+}
+
 function notificationRecipientsForContext(context: JsonRecord, channels: NotificationChannel[]): JsonRecord[] {
   const browserPush = asRecord(context.browser_push) ?? {};
   const user = asRecord(context.user) ?? {};
+  const browserPushDeviceTarget = browserPushDeviceTargetForContext(context);
   const recipients: JsonRecord[] = [];
 
   if (channels.includes("browser_push")) {
@@ -944,6 +951,7 @@ function notificationRecipientsForContext(context: JsonRecord, channels: Notific
         data: {
           user_id: userId || undefined,
           user_email: email,
+          browser_push_device_target: browserPushDeviceTarget,
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id) || null
         }
@@ -958,6 +966,7 @@ function notificationRecipientsForContext(context: JsonRecord, channels: Notific
         data: {
           user_id: userId,
           user_email: email || undefined,
+          browser_push_device_target: browserPushDeviceTarget,
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id) || null
         }
@@ -1017,6 +1026,7 @@ async function emitPlatformOperationStepNotification(
   const message = truncate(redactText(asString(event.message, `${stepTitle} is ${status}.`)), 2000);
   const channels = notificationChannelsForContext(context);
   const browserPush = asRecord(context.browser_push) ?? {};
+  const notificationPreferences = asRecord(context.notification_preferences) ?? {};
   const fallbackChannels = notificationChannels(context.fallback_channels);
   const recipients = notificationRecipientsForContext(context, channels);
   if (!channels.length || !recipients.length) {
@@ -1072,6 +1082,8 @@ async function emitPlatformOperationStepNotification(
           requested_at: asString(context.requested_at) || null,
           selected_channels: channels,
           fallback_channels: fallbackChannels,
+          notification_preferences: redactJsonRecord(notificationPreferences),
+          browser_push_device_target: browserPushDeviceTargetForContext(context),
           fallback_reason: channels.includes("browser_push") ? null : asString(browserPush.reason, "browser_push_unavailable"),
           browser_push: redactJsonRecord(browserPush),
           source_step_status: status

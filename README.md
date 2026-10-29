@@ -53,8 +53,11 @@ that context on the operation payload and emits a notification request after eac
 step status update. Deployment operation notifications are browser-push-only
 until user notification preferences exist. If the context includes a browser
 subscription id, user id, or user email, the notification service is asked to
-resolve a browser push target. If no browser push target can be resolved, the
-notification is skipped/logged instead of falling back to email or SMS.
+resolve browser push targets. The optional
+`notification_preferences.browser_push_device_target` value selects
+`current_device` (the default), `favorite_device`, or `all_devices`. If no
+browser push target can be resolved, the notification is skipped/logged instead
+of falling back to email or SMS.
 Notification failures are logged but do not fail or block the deployment
 operation.
 
