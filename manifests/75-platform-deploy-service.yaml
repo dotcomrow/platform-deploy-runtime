@@ -1320,7 +1320,7 @@ metadata:
     gravitee.io/definition-listener-port: "8080"
     gravitee.io/definition-groups: "cms"
     gravitee.io/definition-tags: "directus,cms,hasura,platform,deploy,terraform"
-    gravitee.io/definition-labels: "internal,cms,hasura,platform,deploy"
+    gravitee.io/definition-labels: "internal,cms,hasura,platform,deploy,hasura.async.handler=platform-operation-worker,hasura.action.roles=user|service"
     gravitee.io/definition-categories: "infra"
     gravitee.io/definition-path-mappings: "/platform-deploy/*"
     gravitee.io/definition-metadata: '{"owner":"infra","service":"platform-deploy","slack":"#infra"}'
