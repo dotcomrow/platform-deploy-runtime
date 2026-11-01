@@ -76,6 +76,7 @@ const FLINK_REST_URL = env.FLINK_REST_URL.replace(/\/+$/, "");
 const PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED = asBoolean(env.PLATFORM_DEPLOY_NOTIFICATIONS_ENABLED, true);
 const PLATFORM_NOTIFICATION_SERVICE_URL = env.PLATFORM_NOTIFICATION_SERVICE_URL.replace(/\/+$/, "");
 const PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY = "platform.deploy.operation-step";
+const INTERNAL_NOTIFICATION_APP_CACHE_MS = 60_000;
 const FLINK_PARALLELISM = Math.max(1, Number(env.FLINK_PARALLELISM) || 1);
 const OPERATION_CALLBACK_TOKEN_TTL_SECONDS = Math.max(300, Number(env.OPERATION_CALLBACK_TOKEN_TTL_SECONDS) || 21_600);
 const STALE_OPERATION_RECONCILE_INTERVAL_SECONDS = Math.max(30, Number(env.STALE_OPERATION_RECONCILE_INTERVAL_SECONDS) || 60);
@@ -933,6 +934,60 @@ function browserPushDeviceTargetForContext(context: JsonRecord): string {
   return value === "favorite_device" || value === "all_devices" ? value : "current_device";
 }
 
+let internalNotificationAppCache: { id: string; expiresAt: number } | null = null;
+let internalNotificationAppLookup: Promise<string> | null = null;
+
+async function resolveInternalNotificationAppId(): Promise<string> {
+  if (internalNotificationAppCache && internalNotificationAppCache.expiresAt > Date.now()) {
+    return internalNotificationAppCache.id;
+  }
+  if (internalNotificationAppLookup) {
+    return internalNotificationAppLookup;
+  }
+  internalNotificationAppLookup = (async () => {
+    const fields = "id,app_key,keycloak_realm,status";
+    const response = await directusJson<DirectusListResponse<PlatformApp>>(
+      `/items/platform_apps${queryString({
+        fields,
+        "filter[app_key][_eq]": "internal",
+        "filter[keycloak_realm][_eq]": "internal",
+        "filter[status][_eq]": "active",
+        limit: 2,
+        _cb: randomUUID()
+      })}`
+    );
+    const matching = (response.data ?? []).filter((app) =>
+      app.app_key === "internal" && app.keycloak_realm === "internal"
+    );
+    if (matching.length !== 1 || !matching[0]?.id) {
+      throw new Error(
+        `Expected exactly one active internal/internal notification app; found ${matching.length}.`
+      );
+    }
+    internalNotificationAppCache = {
+      id: matching[0].id,
+      expiresAt: Date.now() + INTERNAL_NOTIFICATION_APP_CACHE_MS
+    };
+    return matching[0].id;
+  })();
+  try {
+    return await internalNotificationAppLookup;
+  } finally {
+    internalNotificationAppLookup = null;
+  }
+}
+
+async function notificationAppIdForContext(context: JsonRecord, targetAppId: string): Promise<string> {
+  const internalNotificationAppId = await resolveInternalNotificationAppId();
+  const requestedNotificationAppId = asString(context.notification_app_id);
+  if (requestedNotificationAppId && requestedNotificationAppId !== internalNotificationAppId) {
+    console.warn(
+      `[platform-deploy-service] ignoring non-internal notification app ${requestedNotificationAppId} for target app ${targetAppId}`
+    );
+  }
+  return internalNotificationAppId;
+}
+
 function notificationRecipientsForContext(context: JsonRecord, channels: NotificationChannel[]): JsonRecord[] {
   const browserPush = asRecord(context.browser_push) ?? {};
   const user = asRecord(context.user) ?? {};
@@ -1021,7 +1076,7 @@ async function emitPlatformOperationStepNotification(
   }
 
   const status = operationStepStatus(event.status, "running");
-  const appId = asString(event.app_id) || appIdFromOperation(operation);
+  const targetAppId = asString(event.app_id) || appIdFromOperation(operation);
   const stepTitle = asString(event.step_label) || stepLabel(stepKey);
   const message = truncate(redactText(asString(event.message, `${stepTitle} is ${status}.`)), 2000);
   const channels = notificationChannelsForContext(context);
@@ -1038,7 +1093,7 @@ async function emitPlatformOperationStepNotification(
   const parameters = {
     operation_id: operation.id,
     operation_type: operation.operation_type,
-    app_id: appId || null,
+    app_id: targetAppId || null,
     step_key: stepKey,
     step_label: stepTitle,
     status,
@@ -1059,6 +1114,7 @@ async function emitPlatformOperationStepNotification(
       console.warn("[platform-deploy-service] notification token is not configured.");
       return;
     }
+    const notificationAppId = await notificationAppIdForContext(context, targetAppId);
     const result = await httpJson<JsonRecord>(`${PLATFORM_NOTIFICATION_SERVICE_URL}/internal/notifications`, {
       method: "POST",
       timeoutMs: REQUEST_TIMEOUT_MS,
@@ -1068,7 +1124,7 @@ async function emitPlatformOperationStepNotification(
         source: "platform-deploy-service",
         severity: notificationSeverityForStep(status),
         priority: notificationPriorityForStep(status),
-        app_id: appId || undefined,
+        app_id: notificationAppId || undefined,
         actor_user_id: asString(user.user_id) || undefined,
         browser_installation_id: asString(browserPush.browser_installation_id) || undefined,
         notification_key: PLATFORM_DEPLOY_OPERATION_STEP_NOTIFICATION_KEY,
@@ -1079,6 +1135,8 @@ async function emitPlatformOperationStepNotification(
         metadata: {
           notification_context_id: asString(context.context_id) || null,
           notification_thread_id: asString(context.thread_id, operation.id),
+          notification_app_id: notificationAppId || null,
+          target_app_id: targetAppId || null,
           requested_at: asString(context.requested_at) || null,
           selected_channels: channels,
           fallback_channels: fallbackChannels,

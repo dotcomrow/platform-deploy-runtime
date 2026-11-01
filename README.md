@@ -50,10 +50,18 @@ Management UI can read the same rows through the Directus/Hasura
 
 When the UI supplies `notification_context`, `platform-deploy-service` preserves
 that context on the operation payload and emits a notification request after each
-step status update. Deployment operation notifications are browser-push-only
-until user notification preferences exist. If the context includes a browser
-subscription id, user id, or user email, the notification service is asked to
-resolve browser push targets. The optional
+step status update. Deployment operation notifications are internal operational
+messages even when the managed target is an external customer app. The service
+therefore resolves the single active `internal/internal` app from Directus and
+uses its current ID for notification templates and browser-subscription routing.
+The lookup is validated and briefly cached; no environment-specific app UUID is
+stored in the service or manifest. The target app ID remains in notification
+parameters and metadata for context. Notification tests do not use the deploy
+service and may still explicitly select internal or external app settings.
+Deployment operation notifications are browser-push-only until user notification
+preferences exist. If the context includes a browser subscription id, user id,
+or user email, the notification service is asked to resolve browser push targets.
+The optional
 `notification_preferences.browser_push_device_target` value selects
 `current_device` (the default), `favorite_device`, or `all_devices`. If no
 browser push target can be resolved, the notification is skipped/logged instead
