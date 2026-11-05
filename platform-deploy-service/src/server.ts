@@ -1325,6 +1325,17 @@ async function upsertOperationStep(
     }
     return patch;
   };
+  const afterStepPersisted = async (step: PlatformOperationStep | null): Promise<void> => {
+    if (stepKey === "prod-deploy" && status === "succeeded" && appId) {
+      const persistedResult = asRecord(buildPatch(step).result_json) ?? {};
+      const deployedSourceVersion = asString(persistedResult.source_commit)
+        || asString(persistedResult.app_build_commit);
+      if (deployedSourceVersion) {
+        await updateApp(appId, { deployed_source_version: deployedSourceVersion });
+      }
+    }
+    dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+  };
 
   const updateExistingStep = async (step: PlatformOperationStep): Promise<void> => {
     await directusJson<DirectusItemResponse<PlatformOperationStep>>(`/items/platform_app_operation_steps/${encodeURIComponent(step.id)}`, {
@@ -1387,7 +1398,7 @@ async function upsertOperationStep(
 
   if (existing?.id) {
     await updateExistingStep(existing);
-    dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+    await afterStepPersisted(existing);
     return;
   }
 
@@ -1400,15 +1411,15 @@ async function upsertOperationStep(
         ...buildPatch(null)
       }
     });
-    dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+    await afterStepPersisted(null);
   } catch (error) {
     if (await updateDeterministicStep()) {
-      dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+      await afterStepPersisted(null);
       return;
     }
 
     if (await updateExistingStepByUniqueFilter()) {
-      dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+      await afterStepPersisted(null);
       return;
     }
 
@@ -1417,7 +1428,7 @@ async function upsertOperationStep(
       const racedExisting = await getOperationStep(operation.id, stepKey);
       if (racedExisting?.id) {
         await updateExistingStep(racedExisting);
-        dispatchPlatformOperationStepNotification(operation, stepKey, notificationEvent());
+        await afterStepPersisted(racedExisting);
         return;
       }
     }
