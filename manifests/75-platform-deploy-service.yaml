@@ -1231,6 +1231,8 @@ spec:
               value: "https://app.terraform.io/api/v2"
             - name: TERRAFORM_RUN_TIMEOUT_SECONDS
               value: "7200"
+            - name: TERRAFORM_RUN_STALL_TIMEOUT_SECONDS
+              value: "900"
             - name: TERRAFORM_RUN_POLL_SECONDS
               value: "20"
             - name: TERRAFORM_RUN_RETRY_ATTEMPTS

@@ -45,6 +45,7 @@ const envSchema = z.object({
   DEFAULT_INITIAL_DEPLOY_WORKFLOW: z.string().default("initial-deploy.yml"),
   DEFAULT_GITHUB_PRODUCTION_REF: z.string().default("prod"),
   TERRAFORM_RUN_TIMEOUT_SECONDS: z.string().default("7200"),
+  TERRAFORM_RUN_STALL_TIMEOUT_SECONDS: z.string().default("900"),
   TERRAFORM_RUN_POLL_SECONDS: z.string().default("20"),
   TERRAFORM_RUN_RETRY_ATTEMPTS: z.string().default("3"),
   TERRAFORM_RUN_RETRY_DELAY_SECONDS: z.string().default("60"),
@@ -84,6 +85,7 @@ const STALE_OPERATION_TIMEOUT_SECONDS = Math.max(900, Number(env.STALE_OPERATION
 const GITHUB_API_BASE = env.GITHUB_API_BASE.replace(/\/+$/, "");
 const TFE_API_BASE = env.TFE_API_BASE.replace(/\/+$/, "");
 const TERRAFORM_RUN_TIMEOUT_SECONDS = Math.max(300, Number(env.TERRAFORM_RUN_TIMEOUT_SECONDS) || 7200);
+const TERRAFORM_RUN_STALL_TIMEOUT_SECONDS = Math.max(120, Number(env.TERRAFORM_RUN_STALL_TIMEOUT_SECONDS) || 900);
 const TERRAFORM_RUN_POLL_SECONDS = Math.max(5, Number(env.TERRAFORM_RUN_POLL_SECONDS) || 20);
 const TERRAFORM_RUN_RETRY_ATTEMPTS = Math.max(1, Math.min(10, Number(env.TERRAFORM_RUN_RETRY_ATTEMPTS) || 3));
 const TERRAFORM_RUN_RETRY_DELAY_SECONDS = Math.max(1, Math.min(600, Number(env.TERRAFORM_RUN_RETRY_DELAY_SECONDS) || 60));
@@ -1972,6 +1974,7 @@ function buildRunnerInput(
     github_ref: githubRef(app, operationType),
     tfe_api_base: TFE_API_BASE,
     terraform_run_timeout_seconds: TERRAFORM_RUN_TIMEOUT_SECONDS,
+    terraform_run_stall_timeout_seconds: TERRAFORM_RUN_STALL_TIMEOUT_SECONDS,
     terraform_run_poll_seconds: TERRAFORM_RUN_POLL_SECONDS,
     terraform_run_retry_attempts: TERRAFORM_RUN_RETRY_ATTEMPTS,
     terraform_run_retry_delay_seconds: TERRAFORM_RUN_RETRY_DELAY_SECONDS,
