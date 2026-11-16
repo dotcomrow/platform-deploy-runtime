@@ -72,6 +72,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListOperationStepsResponse"
+  /internal/operations/{id}/status:
+    get:
+      operationId: getOperationStatus
+      parameters:
+        - $ref: "#/components/parameters/OperationIdPath"
+      responses:
+        "200":
+          description: Current operation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationStatusResponse"
+  /internal/operations/{id}/cancel:
+    post:
+      operationId: cancelOperation
+      parameters:
+        - $ref: "#/components/parameters/OperationIdPath"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelOperationRequest"
+      responses:
+        "200":
+          description: Operation canceled, or its existing terminal state returned idempotently
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelOperationResponse"
   /internal/operations/{id}/steps/{stepKey}:
     post:
       operationId: recordOperationStep
@@ -266,6 +296,96 @@ components:
         duration_ms:
           type: integer
           minimum: 0
+    OperationStatusResponse:
+      type: object
+      required:
+        - ok
+        - operation_id
+        - operation_type
+        - status
+        - active
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        operation_id:
+          type: string
+          format: uuid
+        app_id:
+          type: string
+          format: uuid
+          nullable: true
+        operation_type:
+          type: string
+          enum:
+            - create
+            - update
+            - redeploy
+            - delete
+            - destroy
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        active:
+          type: boolean
+    CancelOperationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 1000
+          description: Administrative reason recorded with the canceled operation.
+    CancelOperationResponse:
+      type: object
+      required:
+        - ok
+        - operation_id
+        - operation_type
+        - status
+        - active
+        - canceled
+        - idempotent
+      additionalProperties: true
+      properties:
+        ok:
+          type: boolean
+        operation_id:
+          type: string
+          format: uuid
+        app_id:
+          type: string
+          format: uuid
+          nullable: true
+        operation_type:
+          type: string
+          enum:
+            - create
+            - update
+            - redeploy
+            - delete
+            - destroy
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        active:
+          type: boolean
+        canceled:
+          type: boolean
+        idempotent:
+          type: boolean
+        message:
+          type: string
     OperationStep:
       type: object
       additionalProperties: true

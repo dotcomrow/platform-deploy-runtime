@@ -342,6 +342,33 @@ data:
       return 1
     }
 
+    operation_is_canceled() {
+      [ -n "${PLATFORM_DEPLOY_CALLBACK_URL:-}" ] || return 1
+      status_out="$(mktemp)"
+      status_url="${PLATFORM_DEPLOY_CALLBACK_URL%/}/internal/operations/${OPERATION_ID}/status"
+      if [ -n "${PLATFORM_DEPLOY_SERVICE_TOKEN:-}" ]; then
+        status_code="$(curl -sS -o "${status_out}" -w '%{http_code}' --connect-timeout 10 --max-time 30 \
+          -H "Authorization: Bearer ${PLATFORM_DEPLOY_SERVICE_TOKEN}" \
+          "${status_url}" 2>>/tmp/platform-deploy.log || true)"
+      else
+        status_code="$(curl -sS -o "${status_out}" -w '%{http_code}' --connect-timeout 10 --max-time 30 \
+          "${status_url}" 2>>/tmp/platform-deploy.log || true)"
+      fi
+      operation_status=""
+      if [ "${status_code}" = "200" ]; then
+        operation_status="$(jq -r '.status // empty' "${status_out}" 2>/dev/null || true)"
+      fi
+      rm -f "${status_out}"
+      [ "${operation_status}" = "canceled" ]
+    }
+
+    exit_if_operation_canceled() {
+      if operation_is_canceled; then
+        echo "[runner] Operation ${OPERATION_ID} was canceled; stopping runner work." | tee -a /tmp/platform-deploy.log
+        exit 0
+      fi
+    }
+
     finish() {
       status="$1"
       error_message="${2:-}"
@@ -905,6 +932,18 @@ data:
       deadline=$(( $(date +%s) + ${TERRAFORM_RUN_TIMEOUT_SECONDS:-7200} ))
       poll_seconds="${TERRAFORM_RUN_POLL_SECONDS:-20}"
       while :; do
+        if operation_is_canceled; then
+          cancel_code="$(tfe_api "POST" "/runs/${run_id}/actions/cancel" "" "/tmp/tfe-run-cancel-${run_id}.json")"
+          case "${cancel_code}" in
+            200|202|204)
+              echo "[runner] Requested cancellation of Terraform Cloud run ${run_id}." | tee -a /tmp/platform-deploy.log
+              ;;
+            *)
+              echo "[runner] Terraform Cloud run ${run_id} cancellation returned HTTP ${cancel_code}; the platform operation remains canceled." | tee -a /tmp/platform-deploy.log
+              ;;
+          esac
+          exit 0
+        fi
         code="$(tfe_api "GET" "/runs/${run_id}" "" "/tmp/tfe-run-${run_id}.json")"
         expect_http_success "${code}" "/tmp/tfe-run-${run_id}.json" "Failed to read Terraform Cloud run ${run_id}"
         run_status="$(jq -r '.data.attributes.status // empty' "/tmp/tfe-run-${run_id}.json")"
@@ -999,6 +1038,7 @@ data:
     [ -n "${OPERATION_ID:-}" ] || fail "OPERATION_ID is required."
     [ -n "${APP_ID:-}" ] || fail "APP_ID is required."
     [ -n "${APP_KEY:-}" ] || fail "APP_KEY is required."
+    exit_if_operation_canceled
 
     start_body="$(jq -nc \
       --arg app_id "${APP_ID}" \
@@ -1046,6 +1086,7 @@ data:
 
       [ -n "${ref}" ] || fail "Missing git ref for ${target}."
       [ -n "${workspace}" ] || fail "Missing Terraform workspace for ${target}."
+      exit_if_operation_canceled
 
       workdir="/workspace/${target}"
       rm -rf "${workdir}"
@@ -1071,11 +1112,23 @@ data:
       terraform workspace select "${workspace}" >>/tmp/platform-deploy.log 2>&1 \
         || terraform workspace new "${workspace}" >>/tmp/platform-deploy.log 2>&1
 
+      exit_if_operation_canceled
       if [ "${action}" = "destroy" ]; then
-        terraform destroy -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1
+        terraform destroy -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1 &
       else
-        terraform apply -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1
+        terraform apply -auto-approve -input=false >>/tmp/platform-deploy.log 2>&1 &
       fi
+      terraform_pid="$!"
+      while kill -0 "${terraform_pid}" 2>/dev/null; do
+        if operation_is_canceled; then
+          echo "[runner] Operation ${OPERATION_ID} was canceled; terminating local Terraform for ${target}." | tee -a /tmp/platform-deploy.log
+          kill -TERM "${terraform_pid}" 2>/dev/null || true
+          wait "${terraform_pid}" 2>/dev/null || true
+          exit 0
+        fi
+        sleep 5
+      done
+      wait "${terraform_pid}"
     }
 
     shell_source_ref="${TEMPLATE_PROD_REF:-${TEMPLATE_PREVIEW_REF:-prod}}"

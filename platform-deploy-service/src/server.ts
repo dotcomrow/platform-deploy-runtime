@@ -1446,6 +1446,7 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
   const operationType = operationTypeFromBody(body, operation.operation_type);
   const terminalStatus = terminalStatusFromFinishCallback(operation, body);
   const succeeded = terminalStatus === "succeeded";
+  const canceled = terminalStatus === "canceled";
   const deploymentStatus: DeploymentStatus = succeeded
     ? operationSequence(operationType) === "destroy" ? "destroyed" : "deployed"
     : "failed";
@@ -1457,22 +1458,35 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
     ...bodyResultJson
   };
   const stepResultJson = Object.keys(bodyResultJson).length ? bodyResultJson : operationResultJson;
+  const terminalMessage = succeeded
+    ? "Deployment orchestration finished successfully."
+    : canceled
+      ? "Deployment orchestration was canceled."
+      : "Deployment orchestration failed.";
+  const orchestrationMessage = succeeded
+    ? "NiFi deployment orchestration completed."
+    : canceled
+      ? "NiFi deployment orchestration was canceled before completion."
+      : "NiFi deployment orchestration failed before completion.";
+  const terminalError = succeeded
+    ? null
+    : errorMessage || (canceled ? "Deployment was canceled." : "Deployment failed.");
 
   await upsertOperationStep(operation, "finish", {
     status: terminalStatus,
     app_id: appId,
-    message: succeeded ? "Deployment orchestration finished successfully." : "Deployment orchestration failed.",
+    message: terminalMessage,
     result_json: stepResultJson,
-    error_message: succeeded ? null : errorMessage || "Deployment failed.",
+    error_message: terminalError,
     log_excerpt: asString(body.log_excerpt) || null,
     finished_at: finishedAt
   });
   await upsertOperationStep(operation, "orchestration", {
     status: terminalStatus,
     app_id: appId,
-    message: succeeded ? "NiFi deployment orchestration completed." : "NiFi deployment orchestration failed before completion.",
+    message: orchestrationMessage,
     result_json: stepResultJson,
-    error_message: succeeded ? null : errorMessage || "Deployment failed.",
+    error_message: terminalError,
     log_excerpt: asString(body.log_excerpt) || null,
     finished_at: finishedAt
   });
@@ -1480,7 +1494,7 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
     await updateApp(appId, {
       deployment_status: deploymentStatus,
       last_deployed_at: succeeded && deploymentStatus === "deployed" ? finishedAt : undefined,
-      last_error: succeeded ? null : errorMessage || "Deployment failed."
+      last_error: terminalError
     });
   }
   if (operationActive(operation)) {
@@ -1488,7 +1502,7 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
       status: terminalStatus,
       finished_at: finishedAt,
       result_json: operationResultJson,
-      error_message: succeeded ? null : errorMessage || "Deployment failed.",
+      error_message: terminalError,
       log_excerpt: asString(body.log_excerpt) || null,
       terraform_run_id: asString(body.terraform_run_id) || undefined,
       terraform_run_url: asString(body.terraform_run_url) || undefined
@@ -1502,6 +1516,42 @@ async function applyFinishCallback(operation: PlatformOperation, body: JsonRecor
     active: false,
     deployment_status: deploymentStatus,
     finished_at: finishedAt
+  };
+}
+
+async function cancelOperation(operation: PlatformOperation, body: JsonRecord): Promise<JsonRecord> {
+  if (!operationActive(operation)) {
+    return {
+      ...operationStatusPayload(operation),
+      canceled: operation.status === "canceled",
+      idempotent: true,
+      message: `Operation is already ${operation.status}.`
+    };
+  }
+
+  const canceledAt = new Date().toISOString();
+  const reason = truncate(redactText(asString(body.reason)), 1000)
+    || "Canceled from the internal application by an administrator.";
+  const result = await applyFinishCallback(operation, {
+    app_id: appIdFromOperation(operation),
+    operation_type: operation.operation_type,
+    status: "canceled",
+    error_message: reason,
+    result_json: {
+      cancel_requested: true,
+      cancel_requested_at: canceledAt,
+      cancel_source: "internal-application",
+      cancel_reason: reason
+    }
+  });
+
+  return {
+    ok: true,
+    operation_id: operation.id,
+    canceled: true,
+    idempotent: false,
+    message: reason,
+    ...result
   };
 }
 
@@ -2444,6 +2494,39 @@ const openApiSpec = {
           active: { type: "boolean" }
         }
       },
+      CancelOperationRequest: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          reason: {
+            type: "string",
+            maxLength: 1000,
+            description: "Administrative reason recorded with the canceled operation."
+          }
+        }
+      },
+      CancelOperationResponse: {
+        type: "object",
+        required: ["ok", "operation_id", "operation_type", "status", "active", "canceled", "idempotent"],
+        additionalProperties: true,
+        properties: {
+          ok: { type: "boolean" },
+          operation_id: { type: "string", format: "uuid" },
+          app_id: { type: "string", format: "uuid", nullable: true },
+          operation_type: {
+            type: "string",
+            enum: ["create", "update", "redeploy", "delete", "destroy"]
+          },
+          status: {
+            type: "string",
+            enum: ["queued", "running", "succeeded", "failed", "canceled"]
+          },
+          active: { type: "boolean" },
+          canceled: { type: "boolean" },
+          idempotent: { type: "boolean" },
+          message: { type: "string" }
+        }
+      },
       ListOperationStepsResponse: {
         type: "object",
         required: ["ok", "operation_id", "steps"],
@@ -2649,6 +2732,30 @@ const openApiSpec = {
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/OperationStatusResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/operations/{id}/cancel": {
+      post: {
+        operationId: "cancelOperation",
+        parameters: [{ $ref: "#/components/parameters/OperationIdPath" }],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/CancelOperationRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Operation canceled, or its existing terminal state returned idempotently",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CancelOperationResponse" }
               }
             }
           }
@@ -3041,6 +3148,21 @@ app.get("/internal/operations/:id/status", async (req, res, next) => {
   try {
     const operation = await enforceInternalOrOperationAuth(req, req.params.id);
     res.status(200).json(operationStatusPayload(operation));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/internal/operations/:id/cancel", async (req, res, next) => {
+  try {
+    await enforceInternalAuth(req);
+    const body = unwrapActionBody(req.body);
+    const initialOperation = await getOperation(req.params.id);
+    const appId = appIdFromOperation(initialOperation);
+    const result = appId
+      ? await withAppQueueLock(appId, async () => cancelOperation(await getOperation(req.params.id), body))
+      : await cancelOperation(initialOperation, body);
+    res.status(200).json(result);
   } catch (error) {
     next(error);
   }

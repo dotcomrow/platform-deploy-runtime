@@ -48,6 +48,16 @@ Management UI can read the same rows through the Directus/Hasura
 `platform_app_operation_steps` collection or via
 `GET /internal/operations/{operation_id}/steps`.
 
+Administrators can recover a stuck deployment through
+`POST /internal/operations/{operation_id}/cancel`. The endpoint is idempotent,
+records a terminal `canceled` operation and finish/orchestration steps, and
+releases the app's active-operation lock. Runners poll operation status while
+waiting on Terraform Cloud and while local Terraform is running. A canceled
+operation requests cancellation of the active Terraform Cloud run or terminates
+the local Terraform command before exiting. Because infrastructure work can be
+partially complete at cancellation time, callers must review state before
+queueing a replacement operation.
+
 When the UI supplies `notification_context`, `platform-deploy-service` preserves
 that context on the operation payload and emits a notification request after each
 step status update. Deployment operation notifications are internal operational
